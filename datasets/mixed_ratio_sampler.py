@@ -47,7 +47,7 @@ class MixedRatioSampler(Sampler):
         ########
         # 3. Data Concat related configs
         ########
-        
+
         # offsets are the starting index of each dataset in the concatenated dataset.
         # for example, index from dataset i will be i + offsets[i]
         self.offsets = {}
@@ -81,9 +81,9 @@ class MixedRatioSampler(Sampler):
             order = np.argsort(frac)[::-1] # descending order
             base_samples[order[:remaining_samples]] += 1
         out_counts = {name: int(count) for name, count in zip(self.dnames, base_samples)}
-        
+
         return out_counts
-        
+
     def _probabilistic_sample_counts(self):
         '''
             calculate the sampling counts for each dataset
@@ -106,23 +106,23 @@ class MixedRatioSampler(Sampler):
             for current_dataset_name, count in sample_per_dataset.items():
                 if count == 0:
                     continue
-                
+
                 # sample from the dataset
                 # self.rng.integers implies sampling with replacement.
                 local_indices = self.rng.integers(low=0, high=self.len_datasets[current_dataset_name], size=count)
                 global_indices = [self.offsets[current_dataset_name] + i  for i in local_indices]
                 batch.extend(global_indices) 
-                
+
             if self.shuffle_within_batch:
                 self.rng.shuffle(batch)
             yield batch    
-    
+
     def __len__(self):
         '''
             return the number of steps per epoch per rank
         '''
         return self.steps_per_epoch
-    
+
     def set_epoch(self, epoch: int):
         '''
             set the epoch number at the start of each epoch to reshuffle the datasets
