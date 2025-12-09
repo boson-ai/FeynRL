@@ -8,6 +8,7 @@ from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM, AutoCon
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as torch_dist
 from tqdm import tqdm
+import gc
 
 # imports local methods, classes, etc.
 import config.load as cfg # all config arguments
@@ -45,7 +46,8 @@ def load_models_and_tokenizer(model_name,
                               ref_model_name=None,
                               trust_remote_code=False,
                               attn_impl='',
-                              model_class='llm'):
+                              model_class='llm',
+                              rank=0):
     '''
         Load models and tokenizer from huggingface.
         It also loads the ref model if provided.
@@ -137,12 +139,16 @@ def data_loader_setup(dnames,
                             data_path=files_path)
     shuffle = True if split == 'train' else False
 
+    # For validation, it's usually better to be False to see all data, but if using DistributedSampler
+    # with drop_last=False, it might pad with duplicates.
+    drop_last = True if split == 'train' else False
+
     # 2. Initialize distributed sampler
     sampler = DistributedSampler(dataset,
                                 shuffle=shuffle,
                                 num_replicas=world_size,
                                 rank=rank,
-                                drop_last=True)
+                                drop_last=drop_last)
 
     # 3. Initialize data loader
     dataloader = DataLoader(
@@ -151,7 +157,7 @@ def data_loader_setup(dnames,
                             sampler=sampler,
                             num_workers=num_workers,
                             pin_memory=True,
-                            drop_last=True,
+                            drop_last=drop_last,
                             )
 
     return dataloader, sampler
@@ -204,8 +210,9 @@ if __name__ == "__main__":
     model_engine, ref_model_engine, optimizer = training_engine_setup(deepspeed_config=config.deepspeed,
                                                                       model=model,
                                                                       ref_model=ref_model)
-    inference_engine = inference_engine_setup(config, model)
 
+    if config.model.gradient_checkpointing:
+        model_engine.gradient_checkpointing_enable()
     ########
     # 6. Build env or data loader
     ########
@@ -246,9 +253,6 @@ if __name__ == "__main__":
             alg = calg.SFT(
                            model_engine=model_engine,
                            optimizer=optimizer,
-                           micro_batch_size_per_gpu=config.train.train_batch_size_per_gpu,
-                           clip_grad_norm=config.train.clip_grad_norm,
-                           use_cache=config.model.use_cache,
                            device=model_engine.device)
 
     else:
@@ -261,24 +265,37 @@ if __name__ == "__main__":
         print("Starting training...")
 
     global_step = 0
+
+    # Sync before starting
+    # Ensure all nodes have loaded the model and data before anyone starts iterating
+    torch.distributed.barrier()
+
     for epoch in range(config.train.total_number_of_epochs):
         train_sampler.set_epoch(epoch)
+
         ########
         # 8.1 Training loop
         ########
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{config.train.total_number_of_epochs}", disable=(rank != 0))
 
-        for step, batch in enumerate(progress_bar):
+        for step, micro_batch in enumerate(progress_bar):
             # Move batch to gpu (deepspeed engine device)
-            batch = {k: v.to(model_engine.device) for k, v in batch.items()}
+            micro_batch = {k: v.to(model_engine.device) for k, v in micro_batch.items()}
 
             # Run one train step for micro-batch.
-            metric = alg.train_step(batch)
+            metric = alg.train_step(micro_batch)
             global_step += 1
 
             # logging
             if rank == 0 and step % config.deepspeed.steps_per_print == 0:
                 progress_bar.set_postfix(loss=metric['loss'])
+
+        # Sync before validation to ensure consistent state
+        torch.distributed.barrier()
+
+        # Clear graph and to reclaim fragmented memory from training ONCE per epoch
+        torch.cuda.empty_cache()
+        gc.collect()
 
         ########
         # 8.2 Validation loop
@@ -292,7 +309,8 @@ if __name__ == "__main__":
             num_val_batches += 1
 
         # Average loss across batches and across GPUs
-        avg_val_loss = torch.tensor(val_loss / num_val_batches).to(model_engine.device)
+        avg_val_loss = torch.tensor(val_loss / max(1, num_val_batches)).to(model_engine.device)
+
         # Sync validation loss across GPUs
         torch.distributed.all_reduce(avg_val_loss, op=torch.distributed.ReduceOp.AVG)
 
@@ -302,9 +320,15 @@ if __name__ == "__main__":
         ########
         # 8.3 Save checkpoint
         ########
-        # DeepSpeed saves directory structures, not just a single file.
+        # Sync before saving to ensure no one is still writing
+        torch.distributed.barrier()
+
         tag = f"epoch_{epoch+1}"
+        # DeepSpeed handles the collective saving internally so we don't need to worry about different ranks.
         model_engine.save_checkpoint(config.deepspeed.monitor_config.get("tensorboard", {}).get("output_path", "./checkpoints"), tag=tag)
+
+        # Wait for saving to complete on all ranks
+        torch.distributed.barrier()
 
     if rank == 0:
         print("Training complete.")
