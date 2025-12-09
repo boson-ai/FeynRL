@@ -22,6 +22,7 @@ class Train(BaseModel):
     # optimizer related arguments
     ###############
     optimizer_name: str
+    alg_name: str
     lr: float = Field(..., gt=0)
     adam_epsilon: float
     betas: list[float]
@@ -79,6 +80,7 @@ class Model(BaseModel):
     use_cache: bool
     model_class: str
     attn_implementation: str
+    gradient_checkpointing: bool
 
 class DeepSpeed(BaseModel):
     '''
