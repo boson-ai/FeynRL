@@ -75,9 +75,12 @@ class PairedDataset(Dataset):
         answer_attn_mask = answer_ids_output['attention_mask'][0]
 
         total_seq_len_just_ids = len(prompt_ids) + len(answer_ids)
+        # this to make sure that we don't have empty sequences
+        # if this assert fails, it means that the data is not in the expected format
+        assert total_seq_len_just_ids > 0, "total_seq_len_just_ids should be greater than 0"
 
         # if data is text, it should be 1-dim. adding dim=-1 for future compatibility.
-        seq_ids = torch.cat((prompt_ids, answer_ids), dim=-1, dtype=torch.long)
+        seq_ids = torch.cat((prompt_ids, answer_ids), dim=-1).to(dtype=torch.long)
         seq_attn_mask = torch.cat((prompt_attn_mask, answer_attn_mask), dim=-1)
 
         # length check
@@ -100,13 +103,15 @@ class PairedDataset(Dataset):
         # We add eos to end of each seq, so we need to make sure we do not include it in loss.
         # also we don't include prompt in the loss calculation. so we need to account for that too.
         # so we need to make a loss mask that is 1 for all tokens except the last token of each seq.
-        loss_mask = seq_attn_mask.clone()
+        loss_mask = seq_attn_mask.clone().to(dtype=seq_attn_mask.dtype)
         # prompt tokens are not included in loss
         loss_mask[:len(prompt_ids)] = 0
 
-        # eos token is not included in loss but inorder to that we need to consider min(total_seq_len_just_ids, max_seq_len - 1)
+        # Exclude the last real token (eos) from loss.
+        # eos token is not included in loss but inorder to that we need to consider min(total_seq_len_just_ids - 1, max_seq_len - 1)
         # because we might have already padded the sequence.
-        loss_mask[min(total_seq_len_just_ids, self.max_seq_len - 1)] = 0
+        last_index = min(total_seq_len_just_ids - 1, self.max_seq_len - 1)
+        loss_mask[last_index] = 0
 
         return {
             "seq_ids": seq_ids,
