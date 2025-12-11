@@ -47,10 +47,9 @@ class SFT:
     def forward(self, batch):
         '''
             This function implements a single forward pass for current batch.
-            It returns logits, y, and mask
-            logits: [B, T -1, vocab_size]
-            y: [B, T -1]
-            mask: [B, T -1]
+            It returns logits, y, and mask.
+            The size of batch['seq_ids']/batch['seq_attn_mask']/batch['loss_mask'] is [B, T]
+            The size of return variables logits, y, and mask would be [B, T -1]
         '''
         # batch is a dictionary, so we want to extract things we need from it
         # input_ids/att_mask/pos_ids are [B, T]
@@ -71,16 +70,39 @@ class SFT:
         # [B, T, vocab_size]
         every_token_logits = output.logits
 
-        # label is input_ids shifted by one
-        # so y is [B, T -1]
+        # Example
+        #   prompt = [a, b, c]
+        #   answer = [d, e, f, g, <eos>]
+        # The model input (length = T) is:
+        #   [a, b, c, d, e, f, g, <eos>]
+        #
+        # The y is the input shifted left by one (length = T-1):
+        #   [b, c, d, e, f, g, <eos>]
+        #
+        # The model output (length = T) is if outputs correct results:
+        #   [b, c, d, e, f, g, <eos>, X]
+        # We discard the final token (X) since it is beyond <eos>, leaving logits of shape [T-1, vocab_size].
+        #
+        # The mask is length T, e.g.:
+        #   [0, 0, 1, 1, 1, 1, 1, 0]
+        #
+        # The leading zeros correspond to prompt tokens -> no loss on them.
+        # The final zero corresponds to the <eos> token in our example.
+        #
+        # Since we drop the last output logit, we also drop the first mask value (which is zero anyway),
+        # producing a mask of shape [T-1] aligned with the logits and targets.
+
+
+        # label would be input_ids shifted by one (input_ids[:, 1:])
+        # so the size is [B, T-1]
         y = input_ids[:, 1:].contiguous()
-        # as a result we need to remove last token from every_token_logits
-        # so logits is [B, T -1, vocab_size]
+        # seq_ids = [prompt_ids + answer_ids + EOS]
+        # as we don't care about what is outputs of model for EOS token, we remove it from logits
         logits = every_token_logits[:, :-1, :].contiguous()
 
-        # last input token is EOS, so we don't compute loss for it, hence
-        # we remove it from mask. so mask is [B, T -1]
-        mask = batch['loss_mask'][:, :-1].contiguous()
+        # we need to make mask of size [B, T-1].\
+        # we drop the first mask value (which is zero anyway).
+        mask = batch['loss_mask'][:, 1:].contiguous()
 
         return logits, y, mask
 
