@@ -2,6 +2,7 @@ import torch
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 import os
+from datasets import load_dataset
 
 class PairedDataset(Dataset):
     '''
@@ -41,7 +42,15 @@ class PairedDataset(Dataset):
            Loads the data from a parquet file.
         '''
         try:
-            self.data = pd.read_parquet(self.data_path)
+            # This acts like a list but reads from disk/cache on demand.
+            # if we don't use split, it will return a DatasetDict
+            # DatasetDict({train: Dataset({...})})
+            # if we use split=train, it will return a Dataset
+            # Dataset({...})
+            # split here doesn't mean our actual splits. it is just for compatibility with huggingface datasets.
+            self.data = load_dataset("parquet", data_files=self.data_path, split="train")
+            self.data = pd.DataFrame(self.data)
+
         except Exception as e:
             raise Exception(f"Failed to load data from {self.data_path}: {str(e)}")
 
@@ -69,7 +78,7 @@ class PairedDataset(Dataset):
         prompt_attn_mask = prompt_ids_output['attention_mask'][0]
 
         # label/answer
-        answer_chat_str = answer + self.tokenizer.decode(self.tokenizer.eos_token_id)
+        answer_chat_str = answer + self.tokenizer.eos_token
         answer_ids_output = self.tokenizer(answer_chat_str, return_tensors='pt', add_special_tokens=False)
         answer_ids = answer_ids_output['input_ids'][0]
         answer_attn_mask = answer_ids_output['attention_mask'][0]
@@ -100,14 +109,17 @@ class PairedDataset(Dataset):
             seq_attn_mask = torch.cat((seq_attn_mask, padding_attn_mask), dim=-1)
 
         # loss mask
-        # We add eos to end of each seq, so we need to make sure we do not include it in loss.
+        # We added eos to end of each seq, so we need to make sure we do not include it in loss.
         # also we don't include prompt in the loss calculation. so we need to account for that too.
-        # so we need to make a loss mask that is 1 for all tokens except the last token of each seq.
+        # so we need to make a loss mask that is 1 for all tokens except those tokens.
         loss_mask = seq_attn_mask.clone().to(dtype=seq_attn_mask.dtype)
-        # prompt tokens are not included in loss
-        loss_mask[:len(prompt_ids)] = 0
 
-        # Exclude the last real token (eos) from loss.
+        # Prompt tokens are not included in loss
+        if  len(prompt_ids) > 1:
+            # min should be there when there is truncation as prompt_ids might be longer than truncated seq
+            loss_mask[:len(prompt_ids) - 1] = 0
+
+        # Exclude the last token (eos) from loss.
         # eos token is not included in loss but inorder to that we need to consider min(total_seq_len_just_ids - 1, max_seq_len - 1)
         # because we might have already padded the sequence.
         last_index = min(total_seq_len_just_ids - 1, self.max_seq_len - 1)
