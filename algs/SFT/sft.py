@@ -102,7 +102,7 @@ class SFT:
 
         # we need to make mask of size [B, T-1].\
         # we drop the first mask value (which is zero anyway).
-        mask = batch['loss_mask'][:, 1:].contiguous()
+        mask = batch['loss_mask'][:, 1:].contiguous().to(self.device)
 
         return logits, y, mask
 
