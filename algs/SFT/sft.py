@@ -52,6 +52,10 @@ class SFT:
         # This solves the gradient accumulation bug.
         if self.normalize_loss:
             total_possible_tokens = logits.shape[0]
+            if total_possible_tokens == 0:
+                # This shouldn't happen
+                raise ValueError("Cannot compute loss: total_possible_tokens is 0")
+
             loss = loss / total_possible_tokens
 
         return loss
@@ -117,20 +121,21 @@ class SFT:
         # make sure model is in training mode
         self.model_engine.train()
 
-        # 1. forward pass per gpu/rank
+        # 1. For DeepSpeed, zero_grad should be called at the start of the training step
+        # especially important with gradient accu.
+        self.model_engine.zero_grad()
+
+        # 2. forward pass per gpu/rank
         logits, y, loss_mask = self.forward(micro_batch)
 
-        # 2. compute loss pass
+        # 3. compute loss pass
         loss = self.compute_loss(logits=logits, y=y, loss_mask=loss_mask)
 
-        # 3. backward step
-        # DeepSpeed backward handles gradient accumulation logic automatically.
-        self.model_engine.zero_grad()
-        # It aggregates gradients and only updates weights when accumulation_steps is reached.
+        # 4. backward step
+        # deepspeed aggregates gradients and only updates weights when accumulation_steps is reached.
         self.model_engine.backward(loss)
 
-        # 4. optimizer step
-        # DeepSpeed step handles optimizer updates and gradient clearing.
+        # 5. optimizer step
         self.model_engine.step()
 
         # return loss
