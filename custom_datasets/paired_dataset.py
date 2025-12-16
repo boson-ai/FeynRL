@@ -135,6 +135,17 @@ class PairedDataset(Dataset):
             seq_attn_mask = seq_attn_mask[:self.max_seq_len]
             total_seq_len = len(seq_ids)
 
+            answer_start_idx = prompt_len
+            answer_end_idx = self.max_seq_len
+            actual_answer_tokens_in_seq = answer_end_idx - answer_start_idx
+
+            # We need at least 1 answer token to train on
+            if actual_answer_tokens_in_seq < 1:
+                raise ValueError(
+                    f"Sample {idx}:{current_sample}: After truncation, no answer tokens remain. "
+                                )
+
+
         # 6. pad if necessary
         elif total_seq_len < self.max_seq_len:
             padding_len = self.max_seq_len - total_seq_len
