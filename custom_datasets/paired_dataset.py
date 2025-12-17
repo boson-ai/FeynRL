@@ -142,9 +142,8 @@ class PairedDataset(Dataset):
             # We need at least 1 answer token to train on
             if actual_answer_tokens_in_seq < 1:
                 raise ValueError(
-                    f"Sample {idx}:{current_sample}: After truncation, no answer tokens remain. "
-                                )
-
+                    f"Sample {idx}:{current_sample}: After truncation, no answer tokens remain."
+                )
 
         # 6. pad if necessary
         elif total_seq_len < self.max_seq_len:
