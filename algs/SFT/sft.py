@@ -64,15 +64,16 @@ class SFT:
         '''
             This function implements a single forward pass for current batch.
             It returns logits, y, and mask.
-            The size of batch['seq_ids']/batch['seq_attn_mask']/batch['loss_mask'] is [B, T]
-            The size of return variables logits, y, and mask would be [B, T -1]
+            The size of batch['seq_ids']/batch['seq_attn_mask'] is [B, T]
+            The size of batch['loss_mask'] is [B, T-1]
+            The size of return variables logits, y, and mask would be [B, T-1]
         '''
         # batch is a dictionary, so we want to extract things we need from it
         # input_ids and att_mask are [B, T]
-        input_ids = batch['seq_ids'].to(self.device)
-        att_mask  = batch['seq_attn_mask'].to(self.device)
+        input_ids = batch['seq_ids']
+        att_mask  = batch['seq_attn_mask']
         # loss_mask is [B, T -1]
-        loss_mask = batch['loss_mask'].contiguous().to(self.device)
+        loss_mask = batch['loss_mask'].contiguous()
 
         # if pos_ids is not provided, HF will add that automatically.
         pos_ids   = batch.get('position_ids', None)
