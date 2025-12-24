@@ -10,13 +10,22 @@ class ReplayBuffer(Dataset):
     '''
     def __init__(self,
                 pad_token_id: int,
-                max_seq_len: int):
+                max_seq_len: int
+                ):
 
         self.item: List[Dict[str, Optional[torch.Tensor]]] = []
         self.pad_token_id = pad_token_id
         self.max_seq_len = max_seq_len
         # shows the total number of action tokens which are not masked which
         # can be used for token-weighted scaling later.
+        self.total_action_tokens = 0
+
+    def reset(self):
+        '''
+            Reset the replay buffer when starting a new episode, if
+            the algorithm requires it (e.g., PPO resets; P3O does not).
+        '''
+        self.item = []
         self.total_action_tokens = 0
 
     def ensure_1d(self, x: torch.Tensor, name: str):
