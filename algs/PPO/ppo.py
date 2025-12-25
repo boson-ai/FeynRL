@@ -23,23 +23,21 @@ class PPO:
         self.use_cache = use_cache
 
         # policy related parameters
-        self.kl_coeff = kl_coeff
-        self.clip_low = clip_low
-        self.clip_high = clip_high
-        self.tau = tau
-        self.gamma = gamma
-        self.ent_coeff = entropy_coeff
+        self.kl_coeff = float(kl_coeff)
+        self.clip_low = float(clip_low)
+        self.clip_high = float(clip_high)
+        self.tau = float(tau)
+        self.gamma = float(gamma)
+        self.ent_coeff = float(entropy_coeff)
 
         # value related parameters
-        self.vf_clip = vf_clip
+        self.vf_clip = float(vf_clip)
 
-    @staticmethod
-    def compute_advantages(rewards: torch.Tensor,
+    def compute_advantages(self,
+                           rewards: torch.Tensor,
                            values: torch.Tensor,
                            done: torch.Tensor,
                            mask: torch.Tensor,
-                           gamma: float,
-                           tau: float,
                            last_val: torch.Tensor | None = None,
                           ):
         '''
@@ -110,8 +108,8 @@ class PPO:
             is_valid = mask[:, t]
 
             # GAE: A[t] = delta[t] + gamma * tau * A[t+1] * (1 - done[t])
-            delta = rewards[:, t] + (gamma * next_val * not_done) - values[:, t]
-            last_adv   = is_valid * (delta + (gamma * tau * last_adv * not_done))
+            delta = rewards[:, t] + (self.gamma * next_val * not_done) - values[:, t]
+            last_adv   = is_valid * (delta + (self.gamma * self.tau * last_adv * not_done))
             advs[:, t] = last_adv
 
             # to avoid any leaking from padding.
