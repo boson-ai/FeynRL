@@ -3,15 +3,10 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler
 import os
 from datasets import load_dataset
 
-class PairedDataset(Dataset):
+class PromptResponseDataset(Dataset):
     '''
-        This is a general dataset that works for any source data that has the following formant:
-        {
-            "prompt": [{"role": "system", "content": "this is a system prompt"},
-                       {"role": "user", "content": "this is a user prompt"}],
-            "answer": "this is an answer",
-        }
-        The data should be in a parquet format.
+        This is a general dataset to handle prompt and answer pairs.
+        The data should be in a parquet format and system prompt is optional.
     '''
     def __init__(self, 
                 prompt_key,
@@ -60,16 +55,20 @@ class PairedDataset(Dataset):
 
     def __getitem__(self, idx):
         '''
-           data is a dict with the following format:
-           {
-               "messages": [{"role": "system", "content": "this is a system prompt"},
-                            {"role": "user", "content": "this is a user prompt"}],
-               "answer": "this is an answer",
-               ...
-           }
-           Note system prompt is optional.
+          each sample should have the following format:
+            {
+                "prompt": [{"role": "system", "content": "this is a system prompt"},
+                           {"role": "user", "content": "this is a user prompt"}],
+                "answer": "this is an answer",
+            }
         '''
         current_sample = self.data[idx]
+
+        if self.prompt_key not in current_sample:
+            raise KeyError(f"Missing key '{self.prompt_key}' in sample {current_sample}: keys={list(current_sample.keys())}")
+
+        if self.answer_key not in current_sample:
+            raise KeyError(f"Missing key '{self.answer_key}' in sample {current_sample}: keys={list(current_sample.keys())}")
         message = current_sample[self.prompt_key]
         answer  = current_sample[self.answer_key]
 
@@ -186,3 +185,47 @@ class PairedDataset(Dataset):
         return self.len_data
 
 if __name__ == "__main__":
+    '''
+        This is a simple test to make sure the dataset works.
+    '''
+    from transformers import AutoTokenizer
+    from torch.utils.data import DataLoader
+    import pandas as pd
+
+    tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-1b-it")
+    # add pad token if it doesn't exist, not useful here but good practice
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # this is an example of how the data should look like
+    random_prompts = [
+        {'prompt': [{"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Hello, how are you?"}],
+          'answer': "I'm good, thanks!"
+        },
+        {'prompt': [{"role": "user", "content": "What is the meaning of life?"}],
+          'answer': "The meaning of life is 2000002."
+        },
+        {'prompt': [{"role": "user", "content": "What is the meaning of the universe?"}],
+          'answer': "The meaning of the universe is galaxy plus 2."
+        },
+        {'prompt': [{"role": "user", "content": "This is is a just rather long prompt that is going to be tokenized. This is a test to make sure the dataset works."}],
+          'answer': "This is a test to make sure the dataset works."
+        },
+
+    ]
+    df = pd.DataFrame(random_prompts)
+    df.to_parquet("./promptonly.parquet", index=False)
+
+    dataset = PromptResponseDataset(
+        prompt_key="prompt",
+        answer_key="answer",
+        tokenizer=tokenizer,
+        max_seq_len=50,
+        data_path="./promptonly.parquet",
+    )
+    dataloader = DataLoader(dataset,
+                            batch_size=3,
+                            )
+    for d in dataloader:
+        print(d)
