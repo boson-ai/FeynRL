@@ -7,10 +7,11 @@ class PromptOnlyDataset(Dataset):
         Returns tokenized prompt ids as a list[int] which can be a variable length.
     '''
     def __init__(self, 
-                prompt_key,
-                tokenizer=None, 
-                max_seq_len=0,
-                data_path="",
+                prompt_key: str,
+                tokenizer,
+                max_seq_len: int,
+                data_path: str,
+                return_text: bool=False,
                 ):
         assert prompt_key != "", "prompt_key cannot be empty"
         assert max_seq_len > 0, "max_seq_len must be > 0"
@@ -24,6 +25,7 @@ class PromptOnlyDataset(Dataset):
         self.max_seq_len = int(max_seq_len)
         self.tokenizer   = tokenizer
         self.data_path   = data_path
+        self.return_text = return_text
         self._load_data()
 
     def _load_data(self):
@@ -57,51 +59,59 @@ class PromptOnlyDataset(Dataset):
             raise KeyError(f"Missing key '{self.prompt_key}' in sample {sample}: keys={list(sample.keys())}")
 
         message = sample[self.prompt_key]
-
         # message cannot be empty
         if not message or (isinstance(message, list) and len(message) == 0):
             raise ValueError(f"Sample {idx}:{sample}: Prompt cannot be empty")
 
-        # 1. Get the prompt text, this is what vllm sees.
-        prompt_text = self.tokenizer.apply_chat_template(
-                                                        conversation=message,
-                                                        add_generation_prompt=True,
-                                                        tokenize=False,
-                                                        return_tensors=None,
-                                                        )
-
-        # 2. Tokenize the prompt and return python list[int] directly
-        #    it is used just for length validation, but I added here
-        #    for future use and debugging purposes.
+        # Tokenize prompt for vLLM rollout
         prompt_ids = self.tokenizer.apply_chat_template(
-                                                        conversation=message,
-                                                        add_generation_prompt=True,
-                                                        tokenize=True,
-                                                        return_tensors=None,
-                                                        )
+                                        conversation=message,
+                                        add_generation_prompt=True,
+                                        tokenize=True,
+                                        return_tensors=None,
+                                        )
         if not isinstance(prompt_ids, list) or len(prompt_ids) == 0:
             raise ValueError(f"Sample {idx}:{sample}: tokenization produced empty prompt_ids")
 
-
-        # 3. Validate prompt length
+        # Validate prompt length
         if len(prompt_ids) >= self.max_seq_len:
             raise ValueError(f"Prompt in sample {idx}:{sample}: too long: "
                              f"prompt must be at most {self.max_seq_len} tokens (got {len(prompt_ids)})")
 
-        return prompt_text
+        if self.return_text == False:
+            return prompt_ids
+
+        # Get the prompt text for debugging. it can be used for vLLM rollout too
+        prompt_text = self.tokenizer.apply_chat_template(
+                                        conversation=message,
+                                        add_generation_prompt=True,
+                                        tokenize=False,
+                                        return_tensors=None,
+                                        )
+
+        return  {"prompt_ids": prompt_ids, "prompt_text": prompt_text}
 
     def __len__(self):
         return self.len_data
 
-    @staticmethod
-    def collate_fn(batch):
+    def collate_fn(self, batch):
         '''
             Since pytorch's default collate tries to stack sequences, we need to override it.
-            Otherwise, we will get 'all sequences must have equal size' error.
-            This function just returns the batch as is.
-            batch is List[List[int]] and this function keep it as python lists.
+            Otherwise, we will get all sequences must have equal size error.
+            This function keeps variable-length items as python objects
         '''
-        return batch
+        if self.return_text == False:
+            # batch: List[List[int]]
+            return batch
+
+        prompt_texts = []
+        prompt_ids   = []
+
+        for x in batch:
+            prompt_ids.append(x["prompt_ids"])
+            prompt_texts.append(x["prompt_text"])
+
+        return prompt_texts, prompt_ids
 
 if __name__ == "__main__":
     '''
@@ -127,14 +137,16 @@ if __name__ == "__main__":
     df.to_parquet("./promptonly.parquet", index=False)
 
     dataset = PromptOnlyDataset(
-        prompt_key="prompt",
-        tokenizer=tokenizer,
-        max_seq_len=1024,
-        data_path="./promptonly.parquet",
-    )
+                prompt_key="prompt",
+                tokenizer=tokenizer,
+                max_seq_len=1024,
+                data_path="./promptonly.parquet",
+                return_text=True,
+                )
     dataloader = DataLoader(dataset,
                             batch_size=3,
-                            collate_fn=dataset.collate_fn)
+                            collate_fn=dataset.collate_fn,
+                            shuffle=False)
     for d in dataloader:
         print(d)
         print("\n")
