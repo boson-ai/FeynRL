@@ -1,7 +1,9 @@
 import torch
 import numpy as np
 from tqdm import tqdm
+import ray
 
+@ray.remote(resources={"training": 1})
 class PPO:
     def __init__(self,
                 policy_engine,
@@ -234,7 +236,6 @@ class PPO:
                 last_value: [B, 1] value of the very last token
         '''
         # if pos_ids is not provided, HF will add that automatically.
-        pos_ids   = batch.get('position_ids', None)
         if pos_ids is not None:
             pos_ids = pos_ids.to(input_ids.device)
 
@@ -323,7 +324,7 @@ class PPO:
             is_boundary = (((step + 1) % ga_pi) == 0) or is_last
 
             ########
-            # 1. Data from behavior policy
+            # 1. Data from buffer
             ########
             rewards   = micro_batch['rewards'].to(device, non_blocking=True)
             values    = micro_batch['values'].to(device, non_blocking=True)
@@ -331,6 +332,10 @@ class PPO:
             mask      = micro_batch['mask'].to(device, non_blocking=True)
             last_val  = micro_batch['last_val'].to(device, non_blocking=True)
             old_logprobs = micro_batch['old_logprobs'].to(device, non_blocking=True)
+
+            input_ids = micro_batch['input_ids'].to(device, non_blocking=True)
+            att_mask  = micro_batch['attn_mask'].to(device, non_blocking=True)
+            pos_ids   = micro_batch.get('position_ids', None)
 
             ########
             # 2. Compute advantages
@@ -345,9 +350,6 @@ class PPO:
             ########
             # 3. Forward pass based on the current policy.
             ########
-            input_ids = micro_batch['input_ids'].to(device, non_blocking=True)
-            att_mask  = micro_batch['attn_mask'].to(device, non_blocking=True)
-            pos_ids   = micro_batch.get('position_ids', None)
             pi_logprobs, pi_entropies = self.policy_forward(
                                                 input_ids=input_ids,
                                                 att_mask=att_mask,
@@ -360,7 +362,7 @@ class PPO:
                                                 logprobs=pi_logprobs,
                                                 old_logprobs=old_logprobs,
                                                 advantages=advantages,
-                                                mask=loss_mask,
+                                                mask=mask,
                                                 entropies=pi_entropies)
 
             ########
