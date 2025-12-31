@@ -81,6 +81,8 @@ class VLLMRolloutEngine:
 
             self.vllm_engine = None
             gc.collect()
+
+            # empty cache to prevent fragmentation/oom when re-loading
             try:
                 torch.cuda.empty_cache()
             except Exception:
@@ -191,11 +193,9 @@ class VLLMRolloutEngine:
                 ''' 
                     prompts: [{'prompt_token_ids': [2,..]}, {'prompt_token_ids': [...]}, ...]
                     Returns a list of rollout samples. length ~ B * n_samples.
-                    Each sample includes:
-                      - input_ids (prompt+response)
-                      - mask (0 for prompt, 1 for response)
-                      - old_logprobs (per response token)
-                      - finish_reason
+
+                    token-aligned and prediction-aligned logprobs/mask/done are returned.
+                    Prediction-aligned here means: logit position t predicts token at t+1 (SFT-style shift).
                 '''
                 assert self.vllm_engine is not None, f"{self.model_path} not loaded."
                 generated_outputs = self.vllm_engine.generate(prompts,
@@ -217,38 +217,59 @@ class VLLMRolloutEngine:
                         finish_reason = getattr(response, "finish_reason", None)
                         stop_reason   = getattr(response, "stop_reason", None)
 
-                        # all of the following are on cpu and have length (prompt_len + response_len)
-                        # build input_ids (prompt + response) on cpu
+                        # all have length [T] and token_aligned as described above
                         seq_len = prompt_len + response_len
-                        input_ids = torch.tensor(prompt_ids + response_ids, dtype=torch.int32, device='cpu')
-                        mask      = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
-                        done      = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
-                        old_logps = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
+                        input_ids = torch.tensor(prompt_ids + response_ids, dtype=torch.int64, device='cpu')
+
+                        token_mask      = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
+                        token_done      = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
+                        token_old_logprobs = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
+
+                        # prediction-level
+                        pred_mask      = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
+                        pred_done      = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
+                        pred_old_logprobs = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
+
                         rewards   = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
 
                         if response_len > 0:
-                            # 1 if valid token which we want to update.
-                            mask[prompt_len:] = 1
-
                             if response.logprobs is None:
                                 raise ValueError("response.logprobs is None. Check if SamplingParams(logprobs=1) is set.")
 
-                            # now get data for policy update like old_log_probs, rewards, etc.
+                            #####
+                            # token-aligned
+                            #####
+                            token_mask[prompt_len:] = 1 # 1 if valid token which we want to update.
                             response_logprobs = self.extract_logprobs(response_ids, response.logprobs)
-                            old_logps[prompt_len:] = response_logprobs
-                            rewards   = self.score_response(prompt_ids, response_ids, finish_reason)
-                            rewards[prompt_len:] = rewards
+                            token_old_logprobs[prompt_len:] = response_logprobs
+
+                            #####
+                            # pred-aligned
+                            #####
+                            # To recall how autoregressive models work:
+                            # - response token j is at token index prompt_len + j in input_ids
+                            # - and this is predicted by logits index prompt_len + j - 1
+                            pred_start = prompt_len - 1
+                            pred_end   = seq_len - 1
+                            pred_mask[pred_start:pred_end] = 1
+                            pred_old_logprobs[pred_start:pred_end] = response_logprobs
+
+                            rewards_resp = self.score_response(prompt_ids, response_ids, finish_reason)
+                            rewards[prompt_len:] = rewards_resp
 
                             # Terminal handling:
                             #  1. stop: ended due to EOS or a stop condition so done should be 1.
                             #  2. length: truncated which should not be done=1 and we need to bootstrap
                             if finish_reason == "stop":
-                                done[seq_len - 1] = 1
+                                token_done[seq_len - 1] = 1
+
+                                # pred-aligned terminal is at the logit index that predicts last token
+                                pred_done[seq_len - 2] = 1
 
                             # if stop_reason is None, it means it ended on eos
                             # see here https://docs.vllm.ai/en/stable/api/vllm/outputs/#vllm.outputs.CompletionOutput
-                            eos_in_tokens = response_ids[-1] == self.eos_id
-                            ended_on_eos = (finish_reason == "stop" and stop_reason is None and eos_in_tokens)
+                            eos_in_tokens = (response_ids[-1] == self.eos_id)
+                            ended_on_eos  = (finish_reason == "stop" and stop_reason is None and eos_in_tokens)
 
                         else:
                             ended_on_eos = False
@@ -259,18 +280,24 @@ class VLLMRolloutEngine:
                                                 "policy_version": int(policy_version),
                                                 "loaded_version": int(self.loaded_version),
 
+                                                # token-aligned
                                                 "input_ids": input_ids, #[T]
-                                                "mask": mask, #[T] 1 on response/valid tokens
-                                                "done": done, #[T] 1 on last token if terminal
                                                 "rewards": rewards, #[T]
-                                                "old_logps": old_logps, #[T] 0 on prompt since we don't backprop on it
+                                                "token_mask": token_mask, #[T] 1 on response/valid tokens
+                                                "token_done": token_done, #[T] 1 on last token if terminal
+                                                "token_old_logprobs": token_old_logprobs, #[T] 0 on prompt since we don't backprop on it.
+
+                                                # pred-aligned
+                                                "pred_mask": pred_mask, #[T]
+                                                "pred_done": pred_done, #[T]
+                                                "pred_old_logprobs": pred_old_logprobs, #[T]
 
                                                 "finish_reason": finish_reason,
                                                 "stop_reason": stop_reason,
                                                 "ended_on_eos": ended_on_eos,
 
-                                                "response_ids": response_ids,
-                                                "prompt_ids": prompt_ids,
+                                                "response_ids": response_ids, # list[int]
+                                                "prompt_ids": prompt_ids, # list[int]
                                                 "response_text": getattr(response, "text", ""),
                                                 })
 
@@ -281,7 +308,9 @@ class VLLMRolloutEngine:
             Calculate the reward for each response token.
             it returns a float tensor of len(response_ids).
         '''
-        rewards = self.reward_func(prompt_ids, response_ids, finish_reason)
+        with torch.no_grad():
+            rewards = self.reward_func(prompt_ids, response_ids, finish_reason)
+
         if isinstance(rewards, torch.Tensor):
             rewards = rewards.to(dtype=torch.float32, device='cpu')
 
