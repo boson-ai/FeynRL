@@ -395,5 +395,3 @@ class VLLMRolloutEngine:
             sample["zscore"] = zscore
             if self.reward_broadcast:
                 sample["zscore"][prompt_len:] = zscore[-1]
-
-
