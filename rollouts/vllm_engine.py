@@ -23,6 +23,8 @@ class VLLMRolloutEngine:
                  reward_func: Callable,
                  tensor_parallel_size: int,
                  eos_id: int,
+                 reward_broadcast: bool,
+                 eps_reward_norm: float,
                  ):
 
         # reward function
@@ -51,6 +53,11 @@ class VLLMRolloutEngine:
         self.refresh_model(model_path, 0)
         self.sampling_params = self.make_sampling_params()
 
+        # reward normalization for group normalization
+        self.eps_reward_norm = float(eps_reward_norm)
+        # If True, broadcast a single scalar reward across all tokens in the sequence.
+        # This is used when the reward function provides a single score for the entire completion.
+        self.reward_broadcast = bool(reward_broadcast)
 
     def refresh_model(self, model_path: str, version: int) -> bool:
         '''
@@ -65,7 +72,6 @@ class VLLMRolloutEngine:
         self.load_model()
         self.loaded_version = version
         return True
-
 
     def load_model(self) -> None:
         '''
@@ -224,6 +230,8 @@ class VLLMRolloutEngine:
                 # this works even if n_samples >= 1
                 rollout_samples = []
                 for data in generated_outputs:
+                    group_samples = []
+                    group_stats   = {}
                     prompt_ids = list(data.prompt_token_ids or [])
                     prompt_len = len(prompt_ids)
                     if prompt_len == 0:
@@ -251,10 +259,18 @@ class VLLMRolloutEngine:
 
                         rewards   = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
 
-                        # it is important to score the response regardless of its length.
-                        # if it is empty, then reward-function should handle that case.
+                        # it is important to score the response regardless of its length if it is empty
                         rewards_resp = self.score_response(prompt_ids, response_ids, finish_reason)
                         rewards[prompt_len:] = rewards_resp
+
+                        # keep the sum of rewards
+                        if len(group_stats) == 0:
+                            group_stats['reward'] =[]
+                            group_stats['length'] =[]
+
+                        # is_per_token is False, then rewards_resp will only have value for the last element
+                        group_stats['reward'].append(rewards_resp.sum().item())
+                        group_stats['length'].append(len(response_ids))
 
                         if response_len > 0:
                             if response.logprobs is None:
@@ -296,8 +312,8 @@ class VLLMRolloutEngine:
                         else:
                             ended_on_eos = False
 
-                        # rollout sample
-                        rollout_samples.append({
+                        # rollout sample in group if n_samples >= 1
+                        group_samples.append({
                                                 "iter": int(current_iter),
                                                 "policy_version": int(policy_version),
                                                 "loaded_version": int(self.loaded_version),
@@ -322,6 +338,14 @@ class VLLMRolloutEngine:
                                                 "prompt_ids": prompt_ids, # list[int]
                                                 "response_text": getattr(response, "text", ""),
                                                 })
+                    if len(group_samples) > 0:
+                        self.normalize_rewards(
+                                                samples=group_samples,
+                                                stats=group_stats,
+                                                prompt_len=prompt_len,
+                                                is_per_token=is_per_token)
+
+                    rollout_samples.extend(group_samples)
 
                 return rollout_samples
 
@@ -331,7 +355,8 @@ class VLLMRolloutEngine:
             it returns a float tensor of len(response_ids).
         '''
         with torch.no_grad():
-            rewards = self.reward_func(prompt_ids, response_ids, finish_reason)
+            # per token rewards or scalar reward
+            rewards, is_per_token = self.reward_func(prompt_ids, response_ids, finish_reason)
 
         if isinstance(rewards, torch.Tensor):
             rewards = rewards.to(dtype=torch.float32, device='cpu')
@@ -342,4 +367,33 @@ class VLLMRolloutEngine:
         if rewards.numel() != len(response_ids):
             raise ValueError(f"score_response must return len={len(response_ids)} rewards, got {rewards.numel()}")
 
-        return rewards
+        return rewards, is_per_token
+
+    def normalize_rewards(self,
+                          samples: List[Dict[str, Any]],
+                          stats: Dict[str, List[int]],
+                          prompt_len: int,
+                          is_per_token: bool) -> None:
+        '''
+            Normalize rewards for each group of samples for a given prompt.
+            samples: list of different responses for a given prompt e.g., [{"prompt_ids": [...], "response_ids": [...],...}, ...]
+            stats: {"reward": [...], "length": [...]} or {"reward": [...], "length": [...], "reward": [...], "length": [...]} if reward_broadcast is True
+         '''
+        denom = len(samples) # number of samples in the group
+        mean_scores = stats['reward'].sum() / denom
+        std_scores  = (((stats['reward'] - mean_scores)**2).sum() / denom).sqrt()
+
+        if is_per_token:
+            raise ValueError("per token rewards are not supported yet as normalization is done assuming per response rewards")
+
+        # now update the rewards in the samples
+        for i, sample in enumerate(samples):
+            # sample['reward']: [T] where prompt tokens would get 0
+            # sample['reward'][-1]: means the last token reward
+            zscore = torch.zeros_like(sample['reward'], dtype=torch.float)
+            zscore[-1] = (sample['reward'][-1] - mean_scores) / (std_scores + self.eps_reward_norm)
+            sample["zscore"] = zscore
+            if self.reward_broadcast:
+                sample["zscore"][prompt_len:] = zscore[-1]
+
+
