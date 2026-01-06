@@ -261,7 +261,7 @@ class VLLMRolloutEngine:
                         rewards   = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
 
                         # it is important to score the response regardless of its length if it is empty
-                        rewards_resp = self.score_response(prompt_ids, response_ids, finish_reason)
+                        rewards_resp, is_per_token = self.score_response(prompt_ids, response_ids, finish_reason)
                         rewards[prompt_len:] = rewards_resp
 
                         # is_per_token is False, then rewards_resp will only have value for the last element
