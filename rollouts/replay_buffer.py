@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 # local imports
 from misc.utils import ensure_1d, pad_1d_to_length
 
+@ray.remote
 class ReplayBuffer(Dataset):
     '''
        Replay buffer for RL.
@@ -22,31 +23,73 @@ class ReplayBuffer(Dataset):
         # can be used for token-weighted scaling later.
         self.total_action_tokens = 0
 
+    def add_batch_seqs(self, samples: List[Dict[str, Any]]) -> None:
+        '''
+            Add a batch of sequences to the replay buffer.
+            Note that I have listed here everything that is collected in rollout_engine,
+            but not all of them are used here.
+            - iter: int                  --> [Not added to replay buffer for now]
+            - policy_version: int        --> [Not added to replay buffer for now]
+            - loaded_version: int        --> [Not added to replay buffer for now]
+            - input_ids: torch.Tensor    --> [T]
+            - rewards: torch.Tensor      --> [T]
+            - zscores: torch.Tensor      --> [T] same as rewards if only one sample per prompt
+            - token_mask: torch.Tensor   --> [T] [Not added to replay buffer for now]
+            - token_done: torch.Tensor   --> [T] [Not added to replay buffer for now]
+            - token_old_logprobs: torch.Tensor --> [T] [Not added to replay buffer for now]
+            - pred_mask: torch.Tensor    --> [T] this is prediction aligned so no need to do any weired indexing
+            - pred_done: torch.Tensor    --> [T] this is prediction aligned so no need to do any weired indexing
+            - pred_old_logprobs: torch.Tensor --> [T] this is prediction aligned so no need to do any weired indexing
+            - finish_reason: str         --> already used for done and mask
+            - stop_reason: str           --> already used for done and mask
+            - ended_on_eos: bool         --> already used for done and mask
+            - response_ids: List[int]    --> input id already contains this
+            - prompt_ids: List[int]      --> input id already contains this
+            - response_text: str
+            - response_len: int
+        '''
+        for sample in samples:
+            if sample["response_len"] == 0:
+                continue
+
+            self.add(input_ids=sample["input_ids"],
+                     rewards=sample["rewards"],
+                     zscores=sample["zscores"],
+                     masks=sample["pred_masks"],
+                     dones=sample["pred_dones"],
+                     old_logprobs=sample["pred_old_logprobs"],
+                     v_olds=sample.get("v_old", None),
+                     )
+
     def add(self,
-            generated_token_ids: torch.Tensor,
-            generation_logps: torch.Tensor,
-            prompt_token_ids: torch.Tensor,
+            input_ids: torch.Tensor,
             rewards: torch.Tensor,
+            zscores: torch.Tensor,
+            masks: torch.Tensor,
             dones: torch.Tensor,
-            v_old: Optional[torch.Tensor] = None,
+            old_logprobs: torch.Tensor,
+            v_olds: Optional[torch.Tensor] = None,
             )-> None:
         '''
-            dones: 1=eos, 0=not eos
+            input_ids, rewards, zscores, mask, done, old_logprobs
+            are all prediction aligned and [T].
         '''
         input_ids =  ensure_1d(input_ids, "input_ids")
-        attn_mask = ensure_1d(attn_mask, "attn_mask")
-        old_logps = ensure_1d(old_logps, "old_logps")
-        token_masks = ensure_1d(token_masks, "token_masks")
         rewards = ensure_1d(rewards, "rewards")
-        dones = ensure_1d(dones, "dones")
+        zscores = ensure_1d(zscores, "zscores")
+        masks = ensure_1d(masks, "mask")
+        dones = ensure_1d(dones, "dones") # 1=eos, otherwise zero
+        old_logps = ensure_1d(old_logprobs, "old_logprobs")
+        if v_olds is not None:
+            v_olds = ensure_1d(v_olds, "v_olds")
 
-        if v_old is not None:
-            v_old = self.ensure_1d(v_old, "v_old")
+        # now create attn_masks
+        attn_masks = torch.ones_like(input_ids)
 
         # all these should have the same length
-        tensors = [input_ids, attn_mask, old_logps, token_masks, rewards, dones]
-        if v_old is not None:
-            tensors.append(v_old)
+        tensors = [input_ids, attn_masks, old_logps, masks, rewards, dones, zscores]
+        if v_olds is not None:
+            tensors.append(v_olds)
 
         all_len = {t.numel() for t in tensors}
         if len(all_len) != 1:
@@ -55,27 +98,29 @@ class ReplayBuffer(Dataset):
         # truncate to max_seq_len and save memory
         keep = min(input_ids.numel(), self.max_seq_len)
         input_ids   = input_ids[:keep]
-        attn_mask   = attn_mask[:keep]
+        attn_masks   = attn_masks[:keep]
         old_logps   = old_logps[:keep]
-        token_masks = token_masks[:keep]
+        masks = masks[:keep]
         rewards     = rewards[:keep]
         dones       = dones[:keep]
-        if v_old is not None:
-            v_old = v_old[:keep]
+        zscores     = zscores[:keep]
+        if v_olds is not None:
+            v_olds = v_olds[:keep]
 
         # Keep on CPU; dataLoader can pin_memory for faster H2D.
         self.items.append({
             "input_ids": input_ids.detach().cpu(),
-            "attn_mask": attn_mask.detach().cpu(),
+            "attn_masks": attn_masks.detach().cpu(),
             "old_logps": old_logps.detach().cpu(),
-            "token_masks": token_masks.detach().cpu(),
+            "masks": masks.detach().cpu(),
             "rewards": rewards.detach().cpu(),
             "dones": dones.detach().cpu(),
-            "v_old": v_old.detach().cpu() if v_old is not None else None,
+            "zscores": zscores.detach().cpu(),
+            "v_olds": v_olds.detach().cpu() if v_olds is not None else None,
                         })
 
         # Count only tokens we will ever train on
-        self.total_action_tokens += int((token_masks > 0.5).sum().item())
+        self.total_action_tokens += int((masks > 0.5).sum().item())
 
     def collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         '''
@@ -90,41 +135,43 @@ class ReplayBuffer(Dataset):
         target_len = max(x["input_ids"].numel() for x in batch)
 
         # pad to batch_max_seq
-        input_ids, attn_mask, old_logps = [], [], []
-        token_masks, rewards, dones = [], [], []
+        input_ids, attn_masks, old_logps = [], [], []
+        masks, rewards, dones, zscores = [], [], [], []
         v_old_list = []
         empty_v_count = 0
 
         for x in batch:
             # pad everything to zero except for input_ids which should
             # be padded to pad_token_id
-            input_ids.append(self.pad_to_len(x=x["input_ids"], pad_value=self.pad_token_id, target_len=target_len))
-            attn_mask.append(self.pad_to_len(x=x["attn_mask"], pad_value=0, target_len=target_len))
-            old_logps.append(self.pad_to_len(x=x["old_logps"], pad_value=0.0, target_len=target_len))
-            token_masks.append(self.pad_to_len(x=x["token_masks"], pad_value=0, target_len=target_len))
-            rewards.append(self.pad_to_len(x=x["rewards"], pad_value=0.0, target_len=target_len))
-            dones.append(self.pad_to_len(x=x["dones"], pad_value=0, target_len=target_len))
+            input_ids.append(pad_1d_to_length(x=x["input_ids"], pad_value=self.pad_token_id, target_len=target_len))
+            attn_masks.append(pad_1d_to_length(x=x["attn_masks"], pad_value=0, target_len=target_len))
+            old_logps.append(pad_1d_to_length(x=x["old_logps"], pad_value=0.0, target_len=target_len))
+            masks.append(pad_1d_to_length(x=x["masks"], pad_value=0, target_len=target_len))
+            rewards.append(pad_1d_to_length(x=x["rewards"], pad_value=0.0, target_len=target_len))
+            dones.append(pad_1d_to_length(x=x["dones"], pad_value=0, target_len=target_len))
+            zscores.append(pad_1d_to_length(x=x["zscores"], pad_value=0.0, target_len=target_len))
 
             # if it is None, v_old_list will append None too
             if x["v_old"] is not None:
-                v_old_list.append(self.pad_to_len(x["v_old"], pad_value=0.0, target_len=target_len))
+                v_old_list.append(pad_1d_to_length(x["v_old"], pad_value=0.0, target_len=target_len))
 
             else:
                 empty_v_count += 1
 
         # convert from list of [T] to [B, T]
         input_ids   = torch.stack(input_ids, dim=0)
-        attn_mask   = torch.stack(attn_mask, dim=0)
+        attn_masks  = torch.stack(attn_masks, dim=0)
         old_logps   = torch.stack(old_logps, dim=0)
-        token_masks = torch.stack(token_masks, dim=0)
+        masks       = torch.stack(masks, dim=0)
         rewards     = torch.stack(rewards, dim=0)
         dones       = torch.stack(dones, dim=0)
+        zscores     = torch.stack(zscores, dim=0)
 
         if empty_v_count == len(batch):
-            v_old = None
+            v_olds = None
 
         elif empty_v_count== 0:
-            v_old = torch.stack(v_old_list, dim=0)
+            v_olds = torch.stack(v_old_list, dim=0)
 
         else:
             raise ValueError("Mixed None/non-None v_old inside the same batch")
@@ -137,12 +184,13 @@ class ReplayBuffer(Dataset):
 
         return {
                 "input_ids": input_ids, # [B, T]
-                "attn_mask": attn_mask, # [B, T]
+                "attn_masks": attn_masks, # [B, T]
                 "old_logps": old_logps, # [B, T]
-                "token_masks": token_masks, # [B, T]
+                "masks": masks, # [B, T]
                 "rewards": rewards, # [B, T]
                 "dones": dones, # [B, T]
-                "v_old": v_old, # [B, T] or None
+                "zscores": zscores, # [B, T]
+                "v_olds": v_olds, # [B, T] or None
                 "batch_action_tokens": batch_action_tokens, # scalar int
                 "action_token_weight": action_token_weight, # scalar float
                 }
@@ -153,3 +201,6 @@ class ReplayBuffer(Dataset):
     def __len__(self) -> int:
         return len(self.items)
 
+    def __reset__(self) -> None:
+        self.items = []
+        self.total_action_tokens = 0
