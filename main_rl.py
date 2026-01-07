@@ -17,6 +17,7 @@ from misc.utils import safe_string_to_torch_dtype, get_experiment_dir_name
 from rollouts.vllm_engine import VLLMRolloutEngine
 from rollouts.replay_buffer import ReplayBuffer
 import rewards as reward_fns
+from misc.logging import setup_logging, setup_mlflow
 
 def set_random_seeds(seed):
     '''
@@ -238,17 +239,27 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-file", type=str, default="./config/dummy.yaml", help="config file")
     parser.add_argument("--experiment_id", type=str, default="run_1", help="experiment id")
+    parser.add_argument("--log-level", type=str, default="INFO", help="logging level")
     args = parser.parse_args()
 
     ########
     # 1. Miscellaneous setups
     ########
     rank, local_rank = rank_setup()
+
+    # Setup logging
+    logger = setup_logging(rank=rank, log_level=args.log_level)
+    logger.info(f"Starting RL training...")
+
     config = cfg.load_and_verify(method="rl",
                                  input_yaml=args.config_file,
                                  experiment_id=args.experiment_id,
                                  )
     set_random_seeds(seed=config.run.seed)
+
+    # Setup MLflow (only on rank 0)
+    mlflow_run = setup_mlflow(config=config, rank=rank)
+    logger.info(f"Config loaded. experiment_id: {config.run.experiment_id}")
 
     # number of gpus for training which is used by deepspeed
     training_gpus = config.run.training_gpus
@@ -258,11 +269,14 @@ if __name__ == "__main__":
     ########
     # 2. initialize ray
     ########
+    logger.info(f"Initializing Ray cluster...")
     ray_engine, master_addr = setup_ray(ray_address=config.run.ray_address)
+    logger.info(f"Ray initialized. Master address: {master_addr}")
 
     ########
     # 3. initialize training engine
     ########
+    logger.info(f"Setting up training algorithm: {config.train.alg_name}")
     if str.lower(config.train.alg_name) in {'pg', 'ppo', 'grpo', 'cispo'}:
         if str.lower(config.train.alg_name) == 'pg':
             import algs.PG.pg as calg
@@ -298,29 +312,32 @@ if __name__ == "__main__":
                                                   deepspeed_config=config.deepspeed)
 
     assert len(training_engine_runners) == training_gpus, "Number of training engines does not match number of training gpus"
+    logger.info(f"Created {len(training_engine_runners)} training engine runners")
 
     # Synchronization barrier to prevent deepspeed rendezvous hang
     # wait for all training actors to finish initialization before proceeding
-    if rank == 0:
-        print("Waiting for all training engines to initialize...")
+    logger.info("Waiting for all training engines to initialize...")
 
     ready_checks = [engine.is_ready.remote() for engine in training_engine_runners]
     ready = ray.get(ready_checks)
-    if rank == 0:
-        print("All training engines ready!")
+    logger.info("All training engines ready!")
 
     ########
     # 5. load tokenizer
     ########
+    logger.info(f"Loading tokenizer from {config.model.name}")
     tokenizer = load_tokenizer(model_name=config.model.name,
                                trust_remote_code=config.model.trust_remote_code,
                                rank=rank)
+    logger.info(f"Tokenizer loaded. Vocab size: {tokenizer.vocab_size}, Pad token ID: {tokenizer.pad_token_id}")
 
     ########
     # 6. initialize inference engine
     ########
+    logger.info("Setting up inference/rollout engines...")
     if config.reward.reward_func:
         reward_fnc = getattr(reward_fns, config.reward.reward_func)
+        logger.info(f"Using reward function: {config.reward.reward_func}")
 
     else:
         raise ValueError("Reward function not specified")
@@ -348,6 +365,8 @@ if __name__ == "__main__":
     ########
     # 6. Load the rollout dataloader
     ########
+    logger.info(f"Created {num_rollout_engines} rollout engines with tensor_parallel_size={config.rollout.tensor_parallel_size}")
+    logger.info(f"Loading rollout dataloader from {config.data.train_files_path}")
     rollout_dataloader = rollout_dataloader_setup(files_path=config.data.train_files_path,
                                                   num_workers=config.data.num_workers,
                                                   max_seq_len=config.data.max_seq_len,
@@ -357,23 +376,39 @@ if __name__ == "__main__":
                                                   num_rollout_engines=num_rollout_engines,
                                                   split='train',
                                                   )
+    logger.info(f"Rollout dataloader ready. Total batches per epoch: {len(rollout_dataloader)}")
 
     replay_buffer = ReplayBuffer(pad_token_id=tokenizer.pad_token_id,
                                  max_seq_len=config.data.max_seq_len,
                                  )
+    logger.info("Replay buffer initialized")
     ########
     # 7. Training and evaluation loop
     ########
     policy_version = 0
     number_of_epochs  = config.train.total_number_of_epochs
     total_training_steps_per_epoch = config.train.train_steps_per_epoch
+    global_step = 0
+
+    logger.info("=" * 50)
+    logger.info(f"Starting training: {number_of_epochs} epochs, {total_training_steps_per_epoch} steps/epoch")
+    logger.info(f"Training GPUs: {training_gpus}, Rollout GPUs: {rollout_gpus}")
+    logger.info("=" * 50)
 
     for epoch in range(number_of_epochs):
+        epoch_start_time = time.time()
+        logger.info(f"[Epoch {epoch+1}/{number_of_epochs}] Starting rollout generation...")
+
         ################
         # Sample generation step
         ################
         # 1) Generate rollouts
-        for rollout_batch in rollout_dataloader:
+        rollout_start_time = time.time()
+        total_samples_generated = 0
+        total_reward_sum = 0.0
+        total_response_len = 0
+
+        for rollout_batch_idx, rollout_batch in enumerate(rollout_dataloader):
             # 1.1 split data across rollout engines
             # recall: num_rollout_engines  = max(1, int(rollout_gpus) // tensor_parallel_size)
             # rollout_batch is a List[Dict].
@@ -390,13 +425,25 @@ if __name__ == "__main__":
             # 1.3 gather rollouts
             rollout_lists = ray.get(rollout_samples)
 
-            # 1.4 merge rollouts
+            # 1.4 merge rollouts and collect stats
             rollout_merged = []
             for rl in rollout_lists:
                 rollout_merged.extend(rl)
+                for sample in rl:
+                    total_samples_generated += 1
+                    total_reward_sum += sample['rewards'].sum().item()
+                    total_response_len += sample['response_len']
 
             # 1.5 add to replay buffer
             replay_buffer.add_batch_seqs(rollout_merged)
+
+        rollout_time = time.time() - rollout_start_time
+        avg_reward = total_reward_sum / max(1, total_samples_generated)
+        avg_response_len = total_response_len / max(1, total_samples_generated)
+
+        logger.info(f"[Epoch {epoch+1}] Rollout complete: {total_samples_generated} samples, "
+                    f"avg_reward={avg_reward:.4f}, avg_response_len={avg_response_len:.1f}, "
+                    f"time={rollout_time:.2f}s")
 
         if len(replay_buffer) <= 1:
             raise ValueError("Replay buffer is empty")
@@ -404,6 +451,9 @@ if __name__ == "__main__":
         ################
         # Training step
         ################
+        logger.info(f"[Epoch {epoch+1}] Starting training on {len(replay_buffer)} replay buffer samples...")
+        train_start_time = time.time()
+
         # 2. create dataloader from replay buffer and convert to list as ray needs serializable data
         # (pytorch dataloader cannot be serialized and sent to ray workers).
         train_batches = list(DataLoader(dataset=replay_buffer,
@@ -413,6 +463,7 @@ if __name__ == "__main__":
                                         pin_memory=False,
                                         collate_fn=replay_buffer.collate_fn,
                                         ))
+        logger.info(f"[Epoch {epoch+1}] Created {len(train_batches)} training batches")
 
         # 3. update the policy based on the current replay buffer
         # shard batches across training engines
@@ -432,6 +483,8 @@ if __name__ == "__main__":
         else:
             train_batches_padded = train_batches
 
+        epoch_metrics = {'loss_total': [], 'loss_pi': [], 'loss_ent': [], 'approx_kl': [], 'clipfrac': []}
+
         for tidx in range(total_training_steps_per_epoch):
             # 3.1 send training task to all training engines
             train_futures = []
@@ -448,26 +501,76 @@ if __name__ == "__main__":
                 train_futures.append(engine.train_step.remote(shard))
 
             # 3.2 gather training metrics from all engines
+            # train_metrics: clipfrac, approx_kl, loss_ent, loss_pi, loss_total
             train_metrics = ray.get(train_futures)
 
-            # 3.3 log training progress
-            if rank == 0 and tidx % 10 == 0:
-                # aggregate metrics across all training engines
-                avg_loss = np.mean([m.get('loss_total', 0.0) for m in train_metrics])
-                avg_kl = np.mean([m.get('approx_kl', 0.0) for m in train_metrics])
-                print(f"Epoch {epoch+1}/{number_of_epochs}, "
-                      f"Step {tidx+1}/{total_training_steps_per_epoch}, "
-                      f"Loss: {avg_loss:.4f}, KL: {avg_kl:.4f}")
+            # 3.3 aggregate metrics across all training engines
+            avg_loss = np.mean([m.get('loss_total', 0.0) for m in train_metrics])
+            avg_loss_pi = np.mean([m.get('loss_pi', 0.0) for m in train_metrics])
+            avg_loss_ent = np.mean([m.get('loss_ent', 0.0) for m in train_metrics])
+            avg_kl = np.mean([m.get('approx_kl', 0.0) for m in train_metrics])
+            avg_clipfrac = np.mean([m.get('clipfrac', 0.0) for m in train_metrics])
+
+            # Store for epoch average
+            epoch_metrics['loss_total'].append(avg_loss)
+            epoch_metrics['loss_pi'].append(avg_loss_pi)
+            epoch_metrics['loss_ent'].append(avg_loss_ent)
+            epoch_metrics['approx_kl'].append(avg_kl)
+            epoch_metrics['clipfrac'].append(avg_clipfrac)
+
+            global_step += 1
+
+            # Log to console every 10 steps
+            if tidx % 10 == 0:
+                logger.info(f"[Epoch {epoch+1}][Step {tidx+1}/{total_training_steps_per_epoch}] "
+                           f"loss={avg_loss:.4f}, pi_loss={avg_loss_pi:.4f}, ent_loss={avg_loss_ent:.4f}, "
+                           f"kl={avg_kl:.6f}, clipfrac={avg_clipfrac:.4f}")
+
+            # Log to MLflow every step (only rank 0)
+            if rank == 0 and mlflow_run:
+                mlflow.log_metrics({
+                    "train/loss_total": avg_loss,
+                    "train/loss_pi": avg_loss_pi,
+                    "train/loss_ent": avg_loss_ent,
+                    "train/approx_kl": avg_kl,
+                    "train/clipfrac": avg_clipfrac,
+                }, step=global_step)
 
         # 4. update policy version and reset replay buffer
         policy_version += 1
         replay_buffer.__reset__()
+
+        # Log epoch summary
+        train_time = time.time() - train_start_time
+        epoch_time = time.time() - epoch_start_time
+
+        epoch_avg_loss = np.mean(epoch_metrics['loss_total'])
+        epoch_avg_kl = np.mean(epoch_metrics['approx_kl'])
+        epoch_avg_clipfrac = np.mean(epoch_metrics['clipfrac'])
+
+        logger.info(f"[Epoch {epoch+1}] Training complete: time={train_time:.2f}s, "
+                    f"avg_loss={epoch_avg_loss:.4f}, avg_kl={epoch_avg_kl:.6f}")
+
+        # Log epoch metrics to MLflow
+        if rank == 0 and mlflow_run:
+            mlflow.log_metrics({
+                "epoch/avg_loss": epoch_avg_loss,
+                "epoch/avg_kl": epoch_avg_kl,
+                "epoch/avg_clipfrac": epoch_avg_clipfrac,
+                "epoch/avg_reward": avg_reward,
+                "epoch/avg_response_len": avg_response_len,
+                "epoch/total_samples": total_samples_generated,
+                "epoch/rollout_time_sec": rollout_time,
+                "epoch/train_time_sec": train_time,
+                "epoch/total_time_sec": epoch_time,
+            }, step=epoch + 1)
 
         ################
         # Save current policy
         ################
         tag = f"iter{epoch:06d}_v{policy_version:06d}"
         model_path = get_experiment_dir_name(output_dir=config.run.checkpoint_dir, tag=tag, experiment_id=config.run.experiment_id)
+        logger.info(f"[Epoch {epoch+1}] Saving checkpoint to {model_path}")
 
         # save tokenizer so it's ready when vllm loads the model
         if rank == 0:
@@ -482,18 +585,30 @@ if __name__ == "__main__":
         # Wait for all saves to complete
         ray.get(save_futures)
 
-        # barrier to ensure all files are written before vllm refresh
-        time.sleep(1)  # small delay to ensure filesystem consistency
+        # Flush filesystem buffers to ensure checkpoint is fully written
+        if rank == 0:
+            os.sync()
+
+        logger.info(f"[Epoch {epoch+1}] Checkpoint saved: {model_path}")
 
         ################
         # Refresh rollout policy
         ################
+        logger.info(f"[Epoch {epoch+1}] Refreshing rollout engines with new policy (version {policy_version})...")
         refresh_futures = []
         for eng in rollout_engines:
             refresh_futures.append(eng.refresh_model.remote(model_path, policy_version))
         ray.get(refresh_futures)
+        logger.info(f"[Epoch {epoch+1}] Rollout engines refreshed")
 
-    print("Training completed")
+        logger.info(f"[Epoch {epoch+1}] Complete! Total epoch time: {epoch_time:.2f}s")
+        logger.info("=" * 50)
+
+    # End MLflow run
+    if rank == 0 and mlflow_run:
+        mlflow.end_run()
+
+    logger.info("Training completed successfully!")
     ray.shutdown()
 
 
