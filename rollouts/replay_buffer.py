@@ -5,7 +5,6 @@ from torch.utils.data import Dataset
 # local imports
 from misc.utils import ensure_1d, pad_1d_to_length
 
-@ray.remote
 class ReplayBuffer(Dataset):
     '''
        Replay buffer for RL.
@@ -75,10 +74,10 @@ class ReplayBuffer(Dataset):
             are all prediction aligned and [T].
         '''
         input_ids =  ensure_1d(input_ids, "input_ids")
-        rewards = ensure_1d(rewards, "rewards")
-        zscores = ensure_1d(zscores, "zscores")
-        masks = ensure_1d(masks, "mask")
-        dones = ensure_1d(dones, "dones") # 1=eos, otherwise zero
+        rewards   = ensure_1d(rewards, "rewards")
+        zscores   = ensure_1d(zscores, "zscores")
+        masks     = ensure_1d(masks, "mask")
+        dones     = ensure_1d(dones, "dones") # 1=eos, otherwise zero
         old_logps = ensure_1d(old_logprobs, "old_logprobs")
         if v_olds is not None:
             v_olds = ensure_1d(v_olds, "v_olds")
@@ -177,19 +176,19 @@ class ReplayBuffer(Dataset):
             raise ValueError("Mixed None/non-None v_old inside the same batch")
 
         # info for scaling later
-        batch_action_tokens = int((token_masks > 0.5).sum().item())
+        batch_action_tokens = int((masks > 0.5).sum().item())
         total_action_tokens = max(1, self.total_action_tokens)
         # this is per rank, this is not global. Should be revised outised this class.
         action_token_weight = float(batch_action_tokens) / float(total_action_tokens)
 
         return {
                 "input_ids": input_ids, # [B, T]
-                "attn_masks": attn_masks, # [B, T]
-                "old_logps": old_logps, # [B, T]
-                "masks": masks, # [B, T]
+                "attn_mask": attn_masks, # [B, T]
+                "old_logprobs": old_logps, # [B, T]
+                "mask": masks, # [B, T]
                 "rewards": rewards, # [B, T]
-                "dones": dones, # [B, T]
-                "zscores": zscores, # [B, T]
+                "done": dones, # [B, T]
+                "zscore": zscores, # [B, T]
                 "v_olds": v_olds, # [B, T] or None
                 "batch_action_tokens": batch_action_tokens, # scalar int
                 "action_token_weight": action_token_weight, # scalar float
