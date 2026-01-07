@@ -1,3 +1,4 @@
+import os
 import torch
 import gc
 import ray
@@ -62,12 +63,21 @@ class VLLMRolloutEngine:
 
     def refresh_model(self, model_path: str, version: int) -> bool:
         '''
-           refresh only if the model is changed.
+           Refresh model only if version changed.
         '''
         if self.vllm_engine is not None and \
            self.loaded_version == version and \
            model_path == self.model_path:
             return False
+
+        # Verify ckpt files exist before loading
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
+
+        # Check for config.json as vllm needs that as well
+        config_path = os.path.join(model_path, "config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"config.json not found in {model_path}")
 
         self.model_path = model_path
         self.load_model()
@@ -76,7 +86,7 @@ class VLLMRolloutEngine:
 
     def load_model(self) -> None:
         '''
-           load the model.
+           Load vLLM engine with cleanup and error handling steps.
         '''
         if self.vllm_engine is not None:
             # delete the old engine and free up memory
@@ -87,19 +97,33 @@ class VLLMRolloutEngine:
                 pass
 
             self.vllm_engine = None
+            # memory cleanup
             gc.collect()
-
-            # empty cache to prevent fragmentation/oom when re-loading
             try:
                 torch.cuda.empty_cache()
             except Exception:
                 pass
 
-        self.vllm_engine = LLM(model=self.model_path,
-                               trust_remote_code=self.trust_remote_code,
-                               tensor_parallel_size=self.tensor_parallel_size
-                              )
-    
+            # more cleanup
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+            except Exception:
+                pass
+
+        # Load new model
+        try:
+            self.vllm_engine = LLM(model=self.model_path,
+                                   trust_remote_code=self.trust_remote_code,
+                                   tensor_parallel_size=self.tensor_parallel_size
+                                  )
+            print(f"Successfully loaded vLLM model from {self.model_path}")
+
+        except Exception as e:
+            print(f"Failed to load vLLM model from {self.model_path}: {e}")
+            self.vllm_engine = None
+            raise
+
     def make_sampling_params(self) -> SamplingParams:
         '''
            This function makes sure that sampling policy stays in on-policy regime
@@ -398,3 +422,11 @@ class VLLMRolloutEngine:
             sample["zscores"] = zscore
             if self.reward_broadcast:
                 sample["zscores"][prompt_len:] = zscore[-1]
+
+            # prediction-aligned zscores
+            # zscore[prompt_len:] corresponds to response tokens 0..N-1
+            pred_zscores = torch.zeros_like(sample['reward'], dtype=torch.float)
+            pred_start = prompt_len - 1
+            pred_end   = len(sample['reward']) - 1
+            pred_zscores[pred_start:pred_end] = sample["zscores"][prompt_len:]
+            sample["pred_zscores"] = pred_zscores
