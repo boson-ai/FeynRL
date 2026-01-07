@@ -95,10 +95,9 @@ class VLLMRolloutEngine:
             except Exception:
                 pass
 
-        self.vllm_engine = LLM(
-                                model=self.model_path,
-                                trust_remote_code=self.trust_remote_code,
-                                tensor_parallel_size=self.tensor_parallel_size
+        self.vllm_engine = LLM(model=self.model_path,
+                               trust_remote_code=self.trust_remote_code,
+                               tensor_parallel_size=self.tensor_parallel_size
                               )
     
     def make_sampling_params(self) -> SamplingParams:
@@ -134,7 +133,7 @@ class VLLMRolloutEngine:
         return SamplingParams(
             seed=self.seed,
             n=self.n_samples,
-            best_of=None, # best_of != n implies reranking/selectio
+            best_of=None, # best_of != n implies reranking/selection
 
             temperature=self.temperature,
             top_p=self.top_p, 
@@ -383,8 +382,9 @@ class VLLMRolloutEngine:
             stats: {"reward": [...], "length": [...]} or {"reward": [...], "length": [...], "reward": [...], "length": [...]} if reward_broadcast is True
          '''
         denom = len(samples) # number of samples in the group
-        mean_scores = stats['reward'].sum() / denom
-        std_scores  = (((stats['reward'] - mean_scores)**2).sum() / denom).sqrt()
+        rewards_array = np.array(stats['reward'])
+        mean_scores = rewards_array.sum() / denom
+        std_scores  = np.sqrt(((rewards_array - mean_scores)**2).sum() / denom)
 
         if is_per_token:
             raise ValueError("per token rewards are not supported yet as normalization is done assuming per response rewards")
