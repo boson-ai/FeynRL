@@ -19,9 +19,9 @@ class PG:
                  entropy_coeff: float,
                  use_cache: bool,
                  micro_batch_size_per_gpu: int,
-                 ref_model_path=None,
                  update_after_full_replay: bool,
                  deepspeed_config: deepspeed.DeepSpeedConfig,
+                 ref_model_path: str = None,
                  ):
 
         # model related parameters
@@ -73,11 +73,11 @@ class PG:
             deepspeed.init_distributed()
 
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        print(f"[PG][Rank {rank}] Initializing training engine...")
+        print(f"[Alg:PG][Rank {rank}] Initializing training engine...")
 
         # 2. Load model
         model, ref_model = self.load_model()
-        print(f"[PG][Rank {rank}] Model loaded: {self.model_path}")
+        print(f"[Alg:PG][Rank {rank}] Model loaded: {self.model_path}")
 
         # 2. Initialize model engine
         self.policy_engine, self.optimizer, _, _ = deepspeed.initialize(
@@ -85,7 +85,7 @@ class PG:
                                                             model_parameters=model.parameters(),
                                                             config=ds_config_dict
                                                             )
-        print(f"[PG][Rank {rank}] DeepSpeed engine initialized on device: {self.policy_engine.device}")
+        print(f"[Alg:PG][Rank {rank}] DeepSpeed engine initialized on device: {self.policy_engine.device}")
 
         self.ref_model_engine = None
         if ref_model is not None:
@@ -95,7 +95,7 @@ class PG:
                 ref_model.to(self.policy_engine.device)
                 ref_model.eval()
                 self.ref_model_engine = ref_model
-                print(f"[PG][Rank {rank}] Reference model loaded")
+                print(f"[Alg:PG][Rank {rank}] Reference model loaded")
 
             except:
                 # fallback: initialize with DeepSpeed
@@ -103,7 +103,7 @@ class PG:
                                                         model=ref_model,
                                                         config=ds_config_dict
                                                         )
-                print(f"[PG][Rank {rank}] Reference model initialized with DeepSpeed fallback")
+                print(f"[Alg:PG][Rank {rank}] Reference model initialized with DeepSpeed fallback")
 
     def load_model(self):
         '''
@@ -115,7 +115,7 @@ class PG:
         # 1. model and its config initialization
         model_config = AutoConfig.from_pretrained(self.model_path)
         model = AutoModelForCausalLM.from_pretrained(self.model_path,
-                                                    torch_dtype=self.model_dtype,
+                                                    dtype=self.model_dtype,
                                                     trust_remote_code=self.trust_remote_code,
                                                     config=model_config,
                                                     attn_implementation=None if self.attn_impl == '' else self.attn_impl)
@@ -123,7 +123,7 @@ class PG:
         # if ref model is provided to use it in kl for example.
         if self.ref_model_path:
             ref_model = AutoModelForCausalLM.from_pretrained(self.ref_model_path,
-                                                            torch_dtype=self.model_dtype,
+                                                            dtype=self.model_dtype,
                                                             trust_remote_code=self.trust_remote_code,
                                                             config=model_config,
                                                             attn_implementation=None if self.attn_impl == '' else self.attn_impl)
@@ -226,8 +226,8 @@ class PG:
 
             # save the metrics for debugging
             metrics = {
-                'clipfrac': clipfrac,
-                'approx_kl': approx_kl,
+                'clipfrac': clipfrac.item(),
+                'approx_kl': approx_kl.item(),
                 'loss_ent': loss_ent.item(),
                 'loss_pi': loss_pi.item(),
                 'loss_total': loss_total.item(),
@@ -235,10 +235,11 @@ class PG:
 
         return loss_total, metrics
 
-    def train_step(self, replay_buffer):
+    def train_step(self, local_data):
         '''
-           This function implements a training step per rank/gpu for full replay buffer.
+           This function implements a training step per rank/gpu for local_batch.
            The batch size for each gpu/rank should be micro_batch_size_per_gpu.
+           local_data is part of the replay buffer which will be consumed by the current rank/gpu.
         '''
         assert self.policy_engine is not None, "DeepSpeed engine not initialized"
 
@@ -251,8 +252,8 @@ class PG:
         self.policy_engine.zero_grad()
 
         # 3. create progress bar
-        num_micro = len(replay_buffer) # replay_buffer is already a dataloader of micro-batches
-        progress_bar = tqdm(replay_buffer, total=num_micro)
+        num_micro = len(local_data) # local_data is a dataloader of micro-batches
+        progress_bar = tqdm(local_data, total=num_micro, desc="[Alg:PG] Training Step")
 
         ga_pi_attr = getattr(self.policy_engine, 'gradient_accumulation_steps', 1)
         ga_pi = int(ga_pi_attr() if callable(ga_pi_attr) else ga_pi_attr)
@@ -267,13 +268,10 @@ class PG:
             # 1. Data from buffer
             ########
             # all are [B, T]
-            # zscore is normalized rewards using the number of samples for each proompt
-            # For a given prompt with N sampled completions:
-            #   mu  = (1/N) * \sum_{j=1}^N r_j
-            #   adv_i or zscore_i = (r_i - mu) / (std + eps)
-            # this is a simple baseline for policy gradients as it reflects relative quality
+            # zscore is normalized rewards using the number of samples for each proompt (X -mu) / (std + eps)
+            # this is a simple baseline for policy gradients (PPO in this code) as it reflects relative quality
             # among that prompt’s samples.
-            advs = micro_batch['zscore'][:, :-1].to(device, non_blocking=True)
+            advs      = micro_batch['zscore'][:, :-1].to(device, non_blocking=True)
             done      = micro_batch['done'][:, :-1].to(device, non_blocking=True)
             mask      = micro_batch['mask'][:, :-1].to(device, non_blocking=True)
             old_logprobs = micro_batch['old_logprobs'][:, :-1].to(device, non_blocking=True)
@@ -299,6 +297,11 @@ class PG:
 
             # store metrics
             all_metrics.append(pi_metrics)
+            progress_bar.set_postfix({
+                "loss": f"{pi_loss.item():.4f}",
+                "clip": f"{pi_metrics['clipfrac']:.3f}",
+                "kl": f"{pi_metrics['approx_kl']:.4f}"
+            })
 
             if self.update_only_after_full_replay:
                 # Accumulate gradients across all micro-batches, only update at the end
@@ -327,7 +330,7 @@ class PG:
             Note we must call this on ALL ranks for zero-3 correctness.
         '''
         rank = torch.distributed.get_rank()
-        print(f"[PG][Rank {rank}] Saving checkpoint to {output_dir} with tag {tag}...")
+        print(f"[Alg:PG][Rank {rank}] Saving checkpoint to {output_dir} with tag {tag}...")
 
         try:
             # 1. Save model weights (gathered fp16/bf16)
@@ -343,7 +346,7 @@ class PG:
             if rank == 0:
                 if hasattr(self.policy_engine.module, 'config'):
                     self.policy_engine.module.config.save_pretrained(output_dir)
-                    print(f"[PG][Rank {rank}] Config saved")
+                    print(f"[Alg:PG][Rank {rank}] Config saved")
 
                 else:
                     # fallback by trying to get config from the model itself
@@ -351,18 +354,18 @@ class PG:
                         # wrapped model e.g., deepspeed wrapper
                         if hasattr(self.policy_engine.module.module, 'config'):
                             self.policy_engine.module.module.config.save_pretrained(output_dir)
-                            print(f"[PG][Rank {rank}] Config saved (fallback)")
+                            print(f"[Alg:PG][Rank {rank}] Config saved (fallback)")
 
             # make sure rank 0 finished writing config
             # this ensures vLLM refresh can safely read all files
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
 
-            print(f"[PG][Rank {rank}] Checkpoint save completed!")
+            print(f"[Alg:PG][Rank {rank}] Checkpoint save completed!")
 
         except Exception as e:
             # log error but don't crash allows other ranks to continue
-            print(f"[PG][Rank {rank}] Error saving checkpoint to {output_dir}: {e}")
+            print(f"[Alg:PG][Rank {rank}] Error saving checkpoint to {output_dir}: {e}")
             if torch.distributed.is_initialized():
                 # still need barrier even on error to prevent deadlock
                 torch.distributed.barrier()
