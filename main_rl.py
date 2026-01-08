@@ -2,13 +2,13 @@ import os
 import random
 import numpy as np
 import argparse
-import deepspeed
 import torch
 from transformers import AutoTokenizer
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 import ray
 import time
+import mlflow
 
 # imports local methods, classes, etc.
 import configs.load as cfg # all config arguments
@@ -72,113 +72,86 @@ def setup_ray(ray_address):
 
     return ray, master_addr
 
-def training_runner_setup(model_path,
-                          ref_model_path,
-                          model_dtype,
-                          trust_remote_code,
-                          attn_impl,
-                          world_size,
-                          master_addr,
-                          master_port,
-                          alg,
-                          kl_coeff,
-                          clip_low,
-                          clip_high,
-                          entropy_coeff,
-                          use_cache,
-                          micro_batch_size_per_gpu,
-                          update_after_full_replay,
-                          deepspeed_config):
+def training_engine_setup(params, alg, world_size, master_addr, master_port):
     '''
         This function is responsible for running the training engine.
     '''
+    kwargs = { # model relataed arguments
+               'model_path':params.model.name,
+               'ref_model_path':params.model.ref_model,
+               'model_dtype':safe_string_to_torch_dtype(params.model.dtype),
+               'trust_remote_code':params.model.trust_remote_code,
+               'attn_impl':params.model.attn_implementation,
+               'use_cache':params.model.use_cache,
+
+               # training related arguments
+               'kl_coeff':params.train.kl_coeff,
+               'clip_low':params.train.clip_low,
+               'clip_high':params.train.clip_high,
+               'entropy_coeff':params.train.entropy_coeff,
+               'micro_batch_size_per_gpu':params.train.train_batch_size_per_gpu,
+               'update_after_full_replay':params.train.update_after_full_replay,
+
+               # deepspeed related arguments
+               'deepspeed_config':params.deepspeed
+    }
+    # setup ray runners
     ray_runners = []
     for rank in range(world_size):
-        ray_vars = {
-                    "MASTER_ADDR": master_addr,
+        ray_vars = {"MASTER_ADDR": master_addr,
                     "MASTER_PORT": str(master_port),
                     "RANK": str(rank),
                     "WORLD_SIZE": str(world_size),
-                    "LOCAL_RANK": "0",
-                   }
-
-        runner = alg.options(num_gpus=1,
-                            runtime_env={"env_vars": ray_vars},
-                            ).remote(
-                                     model_path=model_path,
-                                     ref_model_path=ref_model_path,
-                                     model_dtype=safe_string_to_torch_dtype(model_dtype),
-                                     trust_remote_code=trust_remote_code,
-                                     attn_impl=attn_impl,
-                                     kl_coeff=kl_coeff,
-                                     clip_low=clip_low,
-                                     clip_high=clip_high,
-                                     entropy_coeff=entropy_coeff,
-                                     use_cache=use_cache,
-                                     micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-                                     update_after_full_replay=update_after_full_replay,
-                                     deepspeed_config=deepspeed_config,
-                                     )
+                    "LOCAL_RANK": "0",}
+        runner = alg.options(num_gpus=1, runtime_env={"env_vars": ray_vars}).remote(**kwargs)
         ray_runners.append(runner)
 
     return ray_runners
 
-def inference_engine_setup(model_path,
-                           trust_remote_code,
-                           temperature,
-                           max_tokens,
-                           n_samples,
-                           top_p,
-                           top_k,
-                           seed,
-                           ignore_eos,
-                           stop,
-                           stop_token_ids,
-                           prompt_logprobs,
-                           force_strict_on_policy,
-                           reward_func,
-                           tensor_parallel_size,
-                           eos_id,
-                           reward_broadcast,
-                           eps_reward_norm,
-                           rollout_gpus,
-                           ):
+def rollout_engine_setup(params, reward_fnc, eos_id):
     '''
-        This function is responsible for setting up distributed inference engine.
+        This function is responsible for setting up distributed
+        inference/rollout/generation engine.
     '''
+    tp = int(params.rollout.tensor_parallel_size)
+    rollout_gpus = int(params.run.rollout_gpus)
 
-    kwargs = { "model_path": model_path,
-               "trust_remote_code": trust_remote_code,
-               "temperature": temperature,
-               "max_tokens": max_tokens,
-               "n_samples": n_samples,
-               "top_p": top_p,
-               "top_k": top_k,
-               "seed": seed,
-               "ignore_eos": ignore_eos,
-               "stop": stop,
-               "stop_token_ids": stop_token_ids,
-               "prompt_logprobs": prompt_logprobs,
-               "force_strict_on_policy": force_strict_on_policy,
-               "reward_func": reward_func,
-               "tensor_parallel_size": tensor_parallel_size,
-               "eos_id": eos_id,
-               "reward_broadcast": reward_broadcast,
-               "eps_reward_norm": eps_reward_norm,
+    kwargs = { # model related arguments
+              "model_path":params.model.name,
+              "trust_remote_code":params.model.trust_remote_code,
+
+              # experiment setup related arguments
+              "seed":params.run.seed,
+
+              # rollout generation related arguments
+              "temperature":params.rollout.temperature,
+              "max_tokens":params.rollout.max_tokens,
+              "n_samples":params.rollout.n_samples,
+              "top_p":params.rollout.top_p,
+              "top_k":params.rollout.top_k,
+              "ignore_eos":params.rollout.ignore_eos,
+              "stop":params.rollout.stop,
+              "stop_token_ids":params.rollout.stop_token_ids,
+              "prompt_logprobs":params.rollout.prompt_logprobs,
+              "gpu_memory_utilization":params.rollout.gpu_memory_utilization,
+              "force_strict_on_policy":params.rollout.force_strict_on_policy,
+              "eos_id":eos_id,
+              "tensor_parallel_size":tp,
+
+              # reward related arguments
+              "reward_func":reward_fnc,
+              "reward_broadcast":params.reward.broadcast,
+              "eps_reward_norm":params.reward.eps_reward_norm,
             }
 
-    tp = int(tensor_parallel_size)
-    num_rollout_engines = max(1, int(rollout_gpus) // tp)
-
+    num_rollout_engines = max(1, rollout_gpus // tp)
     rollout_engines = []
     for _ in range(num_rollout_engines):
         rollout_engines.append(VLLMRolloutEngine.options(num_gpus=tp).remote(**kwargs))
 
     return num_rollout_engines, rollout_engines
 
-def load_tokenizer(model_name,
-                   trust_remote_code=False,
-                   rank=0):
+def load_tokenizer(model_name, trust_remote_code=False, rank=0):
     '''
        Load tokenizer from huggingface.
     '''
@@ -202,30 +175,22 @@ def load_tokenizer(model_name,
 
     return tokenizer
 
-def rollout_dataloader_setup(files_path,
-                             num_workers,
-                             max_seq_len,
-                             prompt_key,
-                             rollout_batch_size,
-                             tokenizer,
-                             num_rollout_engines,
-                             split='train',
-                             ):
+def rollout_dataloader_setup(params, tokenizer, num_rollout_engines):
     '''
-       This dataloader is used for rollout generation.
+       This dataloader is used for rollout generation which is used to train the policy.
     '''
     # 1. Initialize our custom datasets
-    prompt_ds = PromptOnlyDataset(prompt_key=prompt_key,
-                                  max_seq_len=max_seq_len,
+    prompt_ds = PromptOnlyDataset(prompt_key=params.data.prompt_key,
+                                  max_seq_len=params.data.max_seq_len,
                                   tokenizer=tokenizer,
-                                  data_path=files_path,
+                                  data_path=params.data.train_files_path,
                                   return_text=False)
 
     # since we split the data across the rollout engines
-    bsz = num_rollout_engines * rollout_batch_size
+    bsz = num_rollout_engines * params.rollout.rollout_batch_size_per_gpu
     dataloader = DataLoader(dataset=prompt_ds,
                             batch_size=bsz,
-                            num_workers=num_workers,
+                            num_workers=params.data.num_workers,
                             shuffle=True,
                             pin_memory=True,
                             drop_last=False,
@@ -233,6 +198,84 @@ def rollout_dataloader_setup(files_path,
                             )
 
     return dataloader
+
+def run_rollout_engines(rollout_dataloader,
+                        num_rollout_engines,
+                        rollout_engines,
+                        epoch,
+                        policy_version,
+                        replay_buffer,
+                        ray_agent):
+    '''
+        This function is used to run rollout generation.
+    '''
+    # 1) Generate rollouts
+    rollout_start_time = time.time()
+    total_samples_generated = 0
+    total_reward_sum = 0.0
+    total_response_len = 0
+
+    dataset_size = len(rollout_dataloader.dataset)
+    # Note dataLoader's batch_size is already num_rollout_engines * rollout_batch_size,
+    batch_size = rollout_dataloader.batch_size
+    num_steps_to_generate_all = (dataset_size + batch_size - 1) // batch_size
+
+    print(
+        f"[Rollout Stats] Dataset size: {dataset_size} | "
+        f"Batch size: {batch_size} "
+        f"({num_rollout_engines} engines × {batch_size // num_rollout_engines} per engine), "
+        f"Steps to generate all samples: {num_steps_to_generate_all}"
+    )
+
+    for rollout_batch in rollout_dataloader:
+        # 1.1 split data across rollout engines
+        # recall: num_rollout_engines  = max(1, int(rollout_gpus) // tensor_parallel_size)
+        # rollout_batch is a List[Dict].
+        shard_size = (len(rollout_batch) + num_rollout_engines - 1) // num_rollout_engines
+        rollout_shards = [rollout_batch[i * shard_size:(i + 1) * shard_size] for i in range(num_rollout_engines)]
+
+        # 1.2 generate rollouts
+        rollout_samples = []
+        for eng, shard in zip(rollout_engines, rollout_shards):
+            rollout_samples.append(eng.generate.remote(prompts=shard,
+                                                        current_iter=epoch,
+                                                        policy_version=policy_version))
+
+        # 1.3 gather rollouts
+        rollout_lists = ray_agent.get(rollout_samples)
+
+        # 1.4 merge rollouts and collect stats
+        rollout_merged = []
+        for rl in rollout_lists:
+            rollout_merged.extend(rl)
+            for sample in rl:
+                total_samples_generated += 1
+                total_reward_sum += sample['rewards'].sum().item()
+                total_response_len += sample['response_len']
+
+        # 1.5 add to replay buffer
+        replay_buffer.add_batch_seqs(rollout_merged)
+
+    rollout_time = time.time() - rollout_start_time
+    avg_reward = total_reward_sum / max(1, total_samples_generated)
+    avg_response_len = total_response_len / max(1, total_samples_generated)
+
+    if len(replay_buffer) <= 1:
+        raise ValueError("Replay buffer is empty")
+
+    return {"total_samples_generated": total_samples_generated,
+            "avg_reward": avg_reward,
+            "avg_response_len": avg_response_len,
+            "rollout_time": rollout_time}
+
+def run_training_engines():
+    pass
+
+def save_ckpt():
+    pass
+
+def refresh_ckpt():
+    pass
 
 if __name__ == "__main__":
     # parse arguments
@@ -258,7 +301,7 @@ if __name__ == "__main__":
     set_random_seeds(seed=config.run.seed)
 
     # Setup MLflow (only on rank 0)
-    mlflow_run = setup_mlflow(config=config, rank=rank)
+    mlflow_run = setup_mlflow(config=config, tracking_uri=config.run.tracking_uri, rank=rank)
     logger.info(f"Config loaded. experiment_id: {config.run.experiment_id}")
 
     # number of gpus for training which is used by deepspeed
@@ -293,23 +336,11 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown algorithm: {config.train.alg_name}")
 
-    training_engine_runners = training_runner_setup(model_path=config.model.name,
-                                                  ref_model_path=config.model.ref_model,
-                                                  model_dtype=config.model.dtype,
-                                                  trust_remote_code=config.model.trust_remote_code,
-                                                  attn_impl=config.model.attn_implementation,
-                                                  world_size=training_gpus,
-                                                  master_addr=master_addr,
-                                                  master_port=config.run.ray_master_port,
-                                                  alg=alg,
-                                                  kl_coeff=config.train.kl_coeff,
-                                                  clip_low=config.train.clip_low,
-                                                  clip_high=config.train.clip_high,
-                                                  entropy_coeff=config.train.entropy_coeff,
-                                                  use_cache=config.model.use_cache,
-                                                  micro_batch_size_per_gpu=config.train.train_batch_size_per_gpu,
-                                                  update_after_full_replay=config.train.update_after_full_replay,
-                                                  deepspeed_config=config.deepspeed)
+    training_engine_runners = training_engine_setup(params=config,
+                                                    alg=alg,
+                                                    world_size=training_gpus,
+                                                    master_addr=master_addr,
+                                                    master_port=config.run.ray_master_port)
 
     assert len(training_engine_runners) == training_gpus, "Number of training engines does not match number of training gpus"
     logger.info(f"Created {len(training_engine_runners)} training engine runners")
@@ -342,40 +373,17 @@ if __name__ == "__main__":
     else:
         raise ValueError("Reward function not specified")
 
-    num_rollout_engines, rollout_engines = inference_engine_setup(model_path=config.model.name,
-                                                                  trust_remote_code=config.model.trust_remote_code,
-                                                                  temperature=config.rollout.temperature,
-                                                                  max_tokens=config.rollout.max_tokens,
-                                                                  n_samples=config.rollout.n_samples,
-                                                                  top_p=config.rollout.top_p,
-                                                                  top_k=config.rollout.top_k,
-                                                                  seed=config.run.seed,
-                                                                  ignore_eos=config.rollout.ignore_eos,
-                                                                  stop=config.rollout.stop,
-                                                                  stop_token_ids=config.rollout.stop_token_ids,
-                                                                  prompt_logprobs=config.rollout.prompt_logprobs,
-                                                                  force_strict_on_policy=config.rollout.force_strict_on_policy,
-                                                                  reward_func=reward_fnc,
-                                                                  tensor_parallel_size=config.rollout.tensor_parallel_size,
-                                                                  eos_id=tokenizer.eos_token_id,
-                                                                  reward_broadcast=config.reward.broadcast,
-                                                                  eps_reward_norm=config.reward.eps_reward_norm,
-                                                                  rollout_gpus=config.run.rollout_gpus,)
+    num_rollout_engines, rollout_engines = rollout_engine_setup(params=config, reward_fnc=reward_fnc, eos_id=tokenizer.eos_token_id)
+    logger.info(f"Created {num_rollout_engines} rollout engines")
 
     ########
     # 6. Load the rollout dataloader
     ########
     logger.info(f"Created {num_rollout_engines} rollout engines with tensor_parallel_size={config.rollout.tensor_parallel_size}")
     logger.info(f"Loading rollout dataloader from {config.data.train_files_path}")
-    rollout_dataloader = rollout_dataloader_setup(files_path=config.data.train_files_path,
-                                                  num_workers=config.data.num_workers,
-                                                  max_seq_len=config.data.max_seq_len,
-                                                  prompt_key=config.data.prompt_key,
-                                                  rollout_batch_size=config.rollout.rollout_batch_size_per_gpu,
+    rollout_dataloader = rollout_dataloader_setup(params=config,
                                                   tokenizer=tokenizer,
-                                                  num_rollout_engines=num_rollout_engines,
-                                                  split='train',
-                                                  )
+                                                  num_rollout_engines=num_rollout_engines)
     logger.info(f"Rollout dataloader ready. Total batches per epoch: {len(rollout_dataloader)}")
 
     replay_buffer = ReplayBuffer(pad_token_id=tokenizer.pad_token_id,
@@ -402,48 +410,17 @@ if __name__ == "__main__":
         ################
         # Sample generation step
         ################
-        # 1) Generate rollouts
-        rollout_start_time = time.time()
-        total_samples_generated = 0
-        total_reward_sum = 0.0
-        total_response_len = 0
+        rollout_stats = run_rollout_engines(rollout_dataloader=rollout_dataloader,
+                                            num_rollout_engines=num_rollout_engines,
+                                            rollout_engines=rollout_engines,
+                                            epoch=epoch,
+                                            policy_version=policy_version,
+                                            replay_buffer=replay_buffer,
+                                            ray_agent=ray)
 
-        for rollout_batch_idx, rollout_batch in enumerate(rollout_dataloader):
-            # 1.1 split data across rollout engines
-            # recall: num_rollout_engines  = max(1, int(rollout_gpus) // tensor_parallel_size)
-            # rollout_batch is a List[Dict].
-            shard_size = (len(rollout_batch) + num_rollout_engines - 1) // num_rollout_engines
-            rollout_shards = [rollout_batch[i * shard_size:(i + 1) * shard_size] for i in range(num_rollout_engines)]
-
-            # 1.2 generate rollouts
-            rollout_samples = []
-            for eng, shard in zip(rollout_engines, rollout_shards):
-                rollout_samples.append(eng.generate.remote(prompts=shard,
-                                                           current_iter=epoch,
-                                                           policy_version=policy_version))
-
-            # 1.3 gather rollouts
-            rollout_lists = ray.get(rollout_samples)
-
-            # 1.4 merge rollouts and collect stats
-            rollout_merged = []
-            for rl in rollout_lists:
-                rollout_merged.extend(rl)
-                for sample in rl:
-                    total_samples_generated += 1
-                    total_reward_sum += sample['rewards'].sum().item()
-                    total_response_len += sample['response_len']
-
-            # 1.5 add to replay buffer
-            replay_buffer.add_batch_seqs(rollout_merged)
-
-        rollout_time = time.time() - rollout_start_time
-        avg_reward = total_reward_sum / max(1, total_samples_generated)
-        avg_response_len = total_response_len / max(1, total_samples_generated)
-
-        logger.info(f"[Epoch {epoch+1}] Rollout complete: {total_samples_generated} samples, "
-                    f"avg_reward={avg_reward:.4f}, avg_response_len={avg_response_len:.1f}, "
-                    f"time={rollout_time:.2f}s")
+        logger.info(f"[Epoch {epoch+1}] Rollout complete: {rollout_stats['total_samples_generated']} samples, "
+                    f"avg_reward={rollout_stats['avg_reward']:.4f}, avg_response_len={rollout_stats['avg_response_len']:.1f}, "
+                    f"time={rollout_stats['rollout_time']:.2f}s")
 
         if len(replay_buffer) <= 1:
             raise ValueError("Replay buffer is empty")
@@ -557,10 +534,10 @@ if __name__ == "__main__":
                 "epoch/avg_loss": epoch_avg_loss,
                 "epoch/avg_kl": epoch_avg_kl,
                 "epoch/avg_clipfrac": epoch_avg_clipfrac,
-                "epoch/avg_reward": avg_reward,
-                "epoch/avg_response_len": avg_response_len,
-                "epoch/total_samples": total_samples_generated,
-                "epoch/rollout_time_sec": rollout_time,
+                "epoch/avg_reward": rollout_stats['avg_reward'],
+                "epoch/avg_response_len": rollout_stats['avg_response_len'],
+                "epoch/total_samples": rollout_stats['total_samples_generated'],
+                "epoch/rollout_time_sec": rollout_stats['rollout_time'],
                 "epoch/train_time_sec": train_time,
                 "epoch/total_time_sec": epoch_time,
             }, step=epoch + 1)
@@ -610,6 +587,3 @@ if __name__ == "__main__":
 
     logger.info("Training completed successfully!")
     ray.shutdown()
-
-
-
