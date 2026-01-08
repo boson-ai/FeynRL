@@ -160,6 +160,7 @@ class Rollout(BaseModel):
     top_k: int | None = None
     ignore_eos: bool | None = None
     stop: str | None = None
+    gpu_memory_utilization: float | None = None
     stop_token_ids: list[int] | None = None
     prompt_logprobs: bool | None = None
     force_strict_on_policy: bool | None = None
@@ -216,19 +217,15 @@ class Config(BaseModel):
 
             # 4 — Optimizer (Auto-Sync)
             # We map generic "optimizer_name" to DeepSpeed's expected structure
-            # If using ZeRO-3 with Offload, we typically want "DeepSpeedCPUAdam"
-            # If no offload, we want "FusedAdam" or "AdamW"
+            # To use DeepSpeedCPUAdam (for offload), we simply specify "Adam" or "AdamW"
             ds_opt_type = "AdamW"
             if "adam" in self.train.optimizer_name.lower():
-                # Check if offload is enabled in YAML
-                zero_stage = self.deepspeed.zero_optimization.get("stage", 0)
-                offload_opt = self.deepspeed.zero_optimization.get("offload_optimizer", {})
+                 ds_opt_type = "Adam"
 
-                if zero_stage == 3 and offload_opt.get("device") == "cpu":
-                    ds_opt_type = "DeepSpeedCPUAdam"
-
-                else:
-                    ds_opt_type = "FusedAdam" # Generally faster on GPU
+            elif "adamw" in self.train.optimizer_name.lower():
+                 ds_opt_type = "AdamW"
+            else:
+                raise ValueError(f"Unsupported optimizer: {self.train.optimizer_name}")
 
             self.deepspeed.optimizer = {
                 "type": ds_opt_type,
@@ -246,8 +243,8 @@ class Config(BaseModel):
                     "type": self.train.lr_scheduler,
                     "params": {
                         "total_num_steps": self.train.total_number_of_epochs * self.train.train_steps_per_epoch,
-                        "warmup_min_lr": 0,
-                        "warmup_max_lr": self.train.lr,
+                        "warmup_min_ratio": 0.0,
+                        "cos_min_ratio": 0.1, # standard default, decays to 10% of max LR
                         "warmup_num_steps": int(self.train.total_number_of_epochs * self.train.train_steps_per_epoch * self.train.warmup_steps_ratio)
                     }
                 }
@@ -258,9 +255,20 @@ class Config(BaseModel):
             if self.deepspeed.zero_optimization is None:
                 self.deepspeed.zero_optimization = {}
 
+            # Remove keys that are None or explicitly disabled via device="none"
+            keys_to_remove = []
+            for k, v in self.deepspeed.zero_optimization.items():
+                if v is None:
+                    keys_to_remove.append(k)
+                elif isinstance(v, dict) and v.get("device") == "none":
+                    keys_to_remove.append(k)
+
+            for k in keys_to_remove:
+                del self.deepspeed.zero_optimization[k]
+
             # Force crucial ZeRO-3 setting if Stage 3 is active
             if self.deepspeed.zero_optimization.get("stage") == 3:
-                # This ensures you don't get 500 small files when you save
+                # This ensures we don't get 500 small files when saving
                 if "stage3_gather_16bit_weights_on_model_save" not in self.deepspeed.zero_optimization:
                     self.deepspeed.zero_optimization["stage3_gather_16bit_weights_on_model_save"] = True
 
