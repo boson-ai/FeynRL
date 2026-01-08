@@ -21,9 +21,9 @@ from misc.logging import setup_logging, setup_mlflow
 
 def set_random_seeds(seed):
     '''
-        Set random seeds, etc., to make it easier to reproduce results eventhough it is not 100% guaranteed.
-        In particualr, since we do distributed training, floating-point arithmetic, non-deterministic operations (e.g., torch.Tensor.index_add_),
-        setting the seed is not enough, just make things a bit "predictable".
+        Set random seeds to make runs more reproducible (still not guaranteed). With distributed training,
+        floating-point math and non-deterministic ops (e.g., torch.Tensor.index_add_) can still cause differences,
+        seeding just reduces the variance a bit.
     '''
     random.seed(seed)
     np.random.seed(seed)
@@ -59,13 +59,11 @@ def setup_ray(ray_address):
     '''
     if ray_address:
         ray.init(address=ray_address, ignore_reinit_error=True)
-
     else:
         ray.init(ignore_reinit_error=True)
 
     try:
         master_addr = ray.util.get_node_ip_address()
-
     except Exception:
         print("Warning: Could not get master address, using localhost")
         master_addr = "127.0.0.1"
@@ -164,11 +162,9 @@ def load_tokenizer(model_name, trust_remote_code=False, rank=0):
     if tokenizer.pad_token_id is None:
         if rank == 0:
             print("Warning: Pad token is not present, using eos token as pad token")
-
         if getattr(tokenizer, 'eos_token', None) is not None:
             # prefer explicit token if available
             tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})
-
         else:
             # fallback to eos token id
             tokenizer.pad_token_id = tokenizer.eos_token_id
