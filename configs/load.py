@@ -191,11 +191,15 @@ class Config(BaseModel):
             Sync DeepSpeed config from train/model without duplicating YAML fields.
             """
             # 1 — Batch Sizes
-            self.deepspeed.train_micro_batch_size_per_gpu = self.train.train_batch_size_per_gpu
+            if self.method == "sl":
+                self.deepspeed.train_micro_batch_size_per_gpu = self.train.train_batch_size_per_gpu
+
             self.deepspeed.gradient_accumulation_steps = self.train.gradient_accumulation_steps
 
             # Explicitly calculate and set train_batch_size for DeepSpeed logging/sanity check
-            if world_size is not None:
+            # This is only for SL training, for RL training we don't need that.
+            if world_size is not None and self.method == "sl":
+                # this is purely informational for ds's internal logging/sanity checks.
                 self.deepspeed.train_batch_size = self.train.train_batch_size_per_gpu * self.train.gradient_accumulation_steps * world_size
 
             # 2 — Gradient Clipping
