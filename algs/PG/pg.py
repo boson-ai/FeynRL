@@ -1,10 +1,9 @@
-import os
 import torch
 import numpy as np
 from tqdm import tqdm
 import ray
 import deepspeed
-from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from transformers import AutoModelForCausalLM, AutoConfig
 
 @ray.remote
 class PG:
@@ -22,6 +21,7 @@ class PG:
                  update_after_full_replay: bool,
                  deepspeed_config: deepspeed.DeepSpeedConfig,
                  ref_model_path: str = None,
+                 deepspeed_ref_config = None,
                  ):
 
         # model related parameters
@@ -34,6 +34,7 @@ class PG:
 
         # training related parameters
         self.deepspeed_config = deepspeed_config
+        self.deepspeed_ref_config = deepspeed_ref_config
         self.micro_batch_size_per_gpu = micro_batch_size_per_gpu
 
         # policy related parameters
@@ -89,21 +90,14 @@ class PG:
 
         self.ref_model_engine = None
         if ref_model is not None:
-            # ref_model is supported here in case if we want to add
-            # additional metrics, divergence, etc. Note, ref_model will not be optimized.
-            try:
-                ref_model.to(self.policy_engine.device)
-                ref_model.eval()
-                self.ref_model_engine = ref_model
-                print(f"[Alg:PG][Rank {rank}] Reference model loaded")
-
-            except:
-                # fallback: initialize with DeepSpeed
-                self.ref_model_engine, _, _, _ = deepspeed.initialize(
+            ref_model.eval()
+            # Use inference-only config (no optimizer needed)
+            ref_ds_config = self.deepspeed_ref_config.model_dump()
+            self.ref_model_engine, _, _, _ = deepspeed.initialize(
                                                         model=ref_model,
-                                                        config=ds_config_dict
+                                                        config=ref_ds_config
                                                         )
-                print(f"[Alg:PG][Rank {rank}] Reference model initialized with DeepSpeed fallback")
+            print(f"[Alg:PG][Rank {rank}] Reference model initialized with DeepSpeed")
 
     def load_model(self):
         '''
@@ -121,16 +115,47 @@ class PG:
                                                     attn_implementation=None if self.attn_impl == '' else self.attn_impl)
 
         # if ref model is provided to use it in kl for example.
-        if self.ref_model_path:
+        if self.ref_model_path and self.kl_coeff > 0.0:
+            ref_config = AutoConfig.from_pretrained(self.ref_model_path)
             ref_model = AutoModelForCausalLM.from_pretrained(self.ref_model_path,
                                                             dtype=self.model_dtype,
                                                             trust_remote_code=self.trust_remote_code,
-                                                            config=model_config,
+                                                            config=ref_config,
                                                             attn_implementation=None if self.attn_impl == '' else self.attn_impl)
         else:
             ref_model = None
 
         return model, ref_model
+
+    def ref_forward(self, input_ids, att_mask, target_ids, pos_ids):
+        '''
+            input_ids and att_mask are [B, T]
+            pos_ids is [B, T] or None
+            target_ids is [B, T-1]
+            Returns:
+                logits is [B, T-1, vocab_size]
+        '''
+        # feed data to model
+        with torch.no_grad():
+            if pos_ids is not None:
+                pos_ids = pos_ids.to(input_ids.device)
+
+            output = self.ref_model_engine(input_ids=input_ids,
+                                           attention_mask=att_mask,
+                                           position_ids=pos_ids,
+                                           use_cache=self.use_cache)
+
+            # [B, T, V] -> [B, T-1, V]
+            logits = output.logits[:, :-1, :].contiguous()
+            B, T_minus_1, vocab_size = logits.shape
+
+            # cross_entropy return -logprobs but we need logprobs
+            # logits is [B, T-1, vocab_size] --> [B * (T-1), vocab_size]
+            # target_ids is [B, T-1] --> [B * (T-1)]
+            neg_logprobs = self.cross_entropy(logits.view(-1, vocab_size), target_ids.view(-1))
+            ref_logprobs = -neg_logprobs.view(B, T_minus_1)
+
+        return ref_logprobs
 
     def policy_forward(self, input_ids, att_mask, pos_ids):
         '''
@@ -170,7 +195,20 @@ class PG:
         if self.ent_coeff > 0.0:
             entropies = torch.distributions.Categorical(logits=logits).entropy()
 
-        return logprobs, entropies
+        return logprobs, entropies, target_ids
+
+    def compute_kl_distance(self, logprobs, ref_logprobs):
+        '''
+            Compute KL divergence between two policies.
+            using var_reduced form:
+            kl = E[log pi/pi_ref] + pi_ref/pi - 1
+        '''
+        # [B, T-1]
+        log_ratio = logprobs - ref_logprobs
+        # pi_ref/pi = exp(ref_logprobs - logprobs)
+        ratio_inv = torch.exp(ref_logprobs - logprobs)
+        kl_dist = log_ratio + ratio_inv - 1
+        return kl_dist
 
     def compute_policy_loss(self,
                             logprobs: torch.Tensor,
@@ -178,11 +216,13 @@ class PG:
                             advantages: torch.Tensor,
                             mask: torch.Tensor,
                             entropies: torch.Tensor,
+                            ref_logprobs: torch.Tensor,
                             ):
         '''
             logprobs: [B, T-1]
             old_logprobs, advantages, mask: [B, T - 1]
             entropies: [B, T-1]
+            ref_logprobs: [B, T-1]
             Compute policy loss:
                 1. ratio = exp(logprobs - old_logprobs)
                 2. loss = -(min(ratio * adv, clip_adv * adv)) * mask
@@ -190,6 +230,7 @@ class PG:
         device = logprobs.device
         dtype = logprobs.dtype
         loss_ent = torch.tensor(0.0, device=device, dtype=dtype)
+        kl_ref   = torch.tensor(0.0, device=device, dtype=dtype)
 
         # 1. make sure advantages are detached and
         # convert to float32 for stability under bf16/fp16
@@ -210,7 +251,11 @@ class PG:
         if entropies is not None and self.ent_coeff > 0.0:
             loss_ent = (entropies * mask).sum() / denom
 
-        loss_total = loss_pi - self.ent_coeff * loss_ent
+        if ref_logprobs is not None and self.kl_coeff > 0.0:
+            kl_dist = self.compute_kl_distance(logprobs=logprobs, ref_logprobs=ref_logprobs)
+            kl_ref  = (kl_dist * mask).sum() / denom
+
+        loss_total = loss_pi - self.ent_coeff * loss_ent + self.kl_coeff * kl_ref
 
         # 5. useful metrics
         with torch.no_grad():
@@ -220,17 +265,20 @@ class PG:
             # fraction of masked tokens that ratio out of ranges
             clipfrac = (clipped_mask.to(dtype=dtype) * mask).sum() / denom
 
-            # approx KL: either E[old_logprobs - logprobs] or E[(ratio - 1) - logratio]
-            approx_kl_t = (ratio - 1.0) - logratio
+            # approx KL (var-reduced): log(pi/pi_old) + pi_old/pi - 1
+            # logratio = log(pi/pi_old)
+            ratio_inv = torch.exp(-logratio)
+            approx_kl_t = logratio + ratio_inv - 1.0
             approx_kl = (approx_kl_t.to(dtype=dtype) * mask).sum() / denom
 
             # save the metrics for debugging
             metrics = {
                 'clipfrac': clipfrac.item(),
-                'approx_kl': approx_kl.item(),
+                'kl_old': approx_kl.item(),
                 'loss_ent': loss_ent.item(),
                 'loss_pi': loss_pi.item(),
                 'loss_total': loss_total.item(),
+                'kl_ref': kl_ref.item(),
             }
 
         return loss_total, metrics
@@ -277,7 +325,7 @@ class PG:
             # this is a simple baseline for policy gradients (PPO in this code) as it reflects relative quality
             # among that prompt’s samples.
             advs      = micro_batch['zscore'][:, :-1].to(device, non_blocking=True)
-            done      = micro_batch['done'][:, :-1].to(device, non_blocking=True)
+            #done      = micro_batch['done'][:, :-1].to(device, non_blocking=True)
             mask      = micro_batch['mask'][:, :-1].to(device, non_blocking=True)
             old_logprobs = micro_batch['old_logprobs'][:, :-1].to(device, non_blocking=True)
 
@@ -289,16 +337,25 @@ class PG:
             # 2. Compute loss
             ########
             # Forward pass through the current policy.
-            pi_logprobs, pi_entropies = self.policy_forward(input_ids=input_ids,
-                                                            att_mask=att_mask,
-                                                            pos_ids=pos_ids)
+            pi_logprobs, pi_entropies, target_ids = self.policy_forward(input_ids=input_ids,
+                                                                        att_mask=att_mask,
+                                                                        pos_ids=pos_ids)
+
+            ref_logprobs = None
+            if self.kl_coeff > 0.0 and self.ref_model_engine is not None:
+                ref_logprobs = self.ref_forward(input_ids=input_ids,
+                                                att_mask=att_mask,
+                                                target_ids=target_ids,
+                                                pos_ids=pos_ids,
+                                                )
 
             # Compute policy loss using the current policy.
             pi_loss, pi_metrics = self.compute_policy_loss(logprobs=pi_logprobs,
                                                            old_logprobs=old_logprobs,
                                                            advantages=advs,
                                                            mask=mask,
-                                                           entropies=pi_entropies)
+                                                           entropies=pi_entropies,
+                                                           ref_logprobs=ref_logprobs)
 
             # store metrics
             all_metrics.append(pi_metrics)
@@ -306,7 +363,8 @@ class PG:
                 progress_bar.set_postfix({
                     "loss": f"{pi_loss.item():.4f}",
                     "clip": f"{pi_metrics['clipfrac']:.3f}",
-                    "kl": f"{pi_metrics['approx_kl']:.4f}"
+                    "kl_old": f"{pi_metrics['kl_old']:.4f}",
+                    "kl_ref": f"{pi_metrics['kl_ref']:.4f}"
                 })
 
             if self.update_only_after_full_replay:
