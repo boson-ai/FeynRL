@@ -53,6 +53,7 @@ class SGRPO:
         self.ready = False
         self.init_training_engine()
         self.ready = True
+        self.alg_name = self.__class__.__name__
 
     def is_ready(self):
         '''
@@ -74,11 +75,11 @@ class SGRPO:
             deepspeed.init_distributed()
 
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        print(f"[Alg:PG][Rank {rank}] Initializing training engine...")
+        print(f"[Alg:{self.alg_name}][Rank {rank}] Initializing training engine...")
 
         # 2. Load model
         model, ref_model = self.load_model()
-        print(f"[Alg:PG][Rank {rank}] Model loaded: {self.model_path}")
+        print(f"[Alg:{self.alg_name}][Rank {rank}] Model loaded: {self.model_path}")
 
         # 2. Initialize model engine
         self.policy_engine, self.optimizer, _, _ = deepspeed.initialize(
@@ -86,7 +87,7 @@ class SGRPO:
                                                             model_parameters=model.parameters(),
                                                             config=ds_config_dict
                                                             )
-        print(f"[Alg:PG][Rank {rank}] DeepSpeed engine initialized on device: {self.policy_engine.device}")
+        print(f"[Alg:{self.alg_name}][Rank {rank}] DeepSpeed engine initialized on device: {self.policy_engine.device}")
 
         self.ref_model_engine = None
         if ref_model is not None:
@@ -97,7 +98,7 @@ class SGRPO:
                                                         model=ref_model,
                                                         config=ref_ds_config
                                                         )
-            print(f"[Alg:PG][Rank {rank}] Reference model initialized with DeepSpeed")
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Reference model initialized with DeepSpeed")
 
     def load_model(self):
         '''
@@ -303,7 +304,7 @@ class SGRPO:
         num_micro = len(micro_batches)
         # torch.distributed.get_rank() would be the same thing as engine_id
         if engine_id == 0:
-            progress_bar = tqdm(micro_batches, total=num_micro, desc="[Alg:PG] Training Step in rank {}".format(engine_id))
+            progress_bar = tqdm(micro_batches, total=num_micro, desc="[Alg:{}] Training Step in rank {}".format(self.alg_name, engine_id))
 
         else:
             progress_bar = micro_batches # No tqdm for other ranks
@@ -394,7 +395,7 @@ class SGRPO:
             Note we must call this on ALL ranks for zero-3 correctness.
         '''
         rank = torch.distributed.get_rank()
-        print(f"[Alg:PG][Rank {rank}] Saving checkpoint to {output_dir} with tag {tag}...")
+        print(f"[Alg:{self.alg_name}][Rank {rank}] Saving checkpoint to {output_dir} with tag {tag}...")
 
         try:
             # 1. Save model weights (gathered fp16/bf16)
@@ -410,7 +411,7 @@ class SGRPO:
             if rank == 0:
                 if hasattr(self.policy_engine.module, 'config'):
                     self.policy_engine.module.config.save_pretrained(output_dir)
-                    print(f"[Alg:PG][Rank {rank}] Config saved")
+                    print(f"[Alg:{self.alg_name}][Rank {rank}] Config saved")
 
                 else:
                     # fallback by trying to get config from the model itself
@@ -418,18 +419,18 @@ class SGRPO:
                         # wrapped model e.g., deepspeed wrapper
                         if hasattr(self.policy_engine.module.module, 'config'):
                             self.policy_engine.module.module.config.save_pretrained(output_dir)
-                            print(f"[Alg:PG][Rank {rank}] Config saved (fallback)")
+                            print(f"[Alg:{self.alg_name}][Rank {rank}] Config saved (fallback)")
 
             # make sure rank 0 finished writing config
             # this ensures vLLM refresh can safely read all files
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
 
-            print(f"[Alg:PG][Rank {rank}] Checkpoint save completed!")
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Checkpoint save completed!")
 
         except Exception as e:
             # log error but don't crash allows other ranks to continue
-            print(f"[Alg:PG][Rank {rank}] Error saving checkpoint to {output_dir}: {e}")
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving checkpoint to {output_dir}: {e}")
             if torch.distributed.is_initialized():
                 # still need barrier even on error to prevent deadlock
                 torch.distributed.barrier()
