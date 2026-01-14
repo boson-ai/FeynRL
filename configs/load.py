@@ -100,7 +100,7 @@ class Model(BaseModel):
     name: str
     dtype: str
     ref_model: str
-    ref_model_device: str
+    ref_model_offload_to_cpu: bool = False
     trust_remote_code: bool
     use_cache: bool
     model_class: str
@@ -139,6 +139,18 @@ class DeepSpeed(BaseModel):
 
     # Monitor config
     monitor_config: Dict[str, Any] | None = None
+
+class DeepSpeedRef(BaseModel):
+    '''
+        Inference-only deepspeed for ref model in rl(no optimizer, no updates).
+    '''
+    model_config = ConfigDict(extra='forbid')
+    fp16: Dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
+    bf16: Dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
+    zero_optimization: Dict[str, Any] = Field(default_factory=dict)
+    train_micro_batch_size_per_gpu: int | None = None
+    # Activation checkpointing (can help with memory)
+    activation_checkpointing: Dict[str, Any] | None = None
 
 class InferenceEngine(BaseModel):
     '''
@@ -190,6 +202,8 @@ class Config(BaseModel):
     # RL-specific sections
     reward: Reward | None = None
     rollout: Rollout | None = None
+    # Reference model DeepSpeed config
+    deepspeed_ref: DeepSpeedRef | None = None
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -293,6 +307,38 @@ class Config(BaseModel):
                 # This ensures we don't get 500 small files when saving
                 if "stage3_gather_16bit_weights_on_model_save" not in self.deepspeed.zero_optimization:
                     self.deepspeed.zero_optimization["stage3_gather_16bit_weights_on_model_save"] = True
+
+            # 7 — Generate ref model config (inference-only, no optimizer/updates)
+            if self.deepspeed_ref is None and self.model.ref_model:
+                # Start from the main deepspeed config
+                ds_dict = self.deepspeed.model_dump()
+
+                # Remove optimizer/scheduler - ref model is frozen, no updates
+                ds_dict.pop("optimizer", None)
+                ds_dict.pop("scheduler", None)
+
+                # Configure zero_optimization for ref model
+                if ds_dict.get("zero_optimization"):
+                    # Remove offload_optimizer - no optimizer for ref model
+                    ds_dict["zero_optimization"].pop("offload_optimizer", None)
+
+                    # Configure CPU offloading based on ref_model_offload_to_cpu flag
+                    if self.model.ref_model_offload_to_cpu:
+                        ds_dict["zero_optimization"]["offload_param"] = {
+                            "device": "cpu",
+                            "pin_memory": True
+                        }
+                    else:
+                        # Remove offload_param if not offloading
+                        ds_dict["zero_optimization"].pop("offload_param", None)
+
+                self.deepspeed_ref = DeepSpeedRef(
+                    fp16=ds_dict.get("fp16", {"enabled": False}),
+                    bf16=ds_dict.get("bf16", {"enabled": False}),
+                    zero_optimization=ds_dict.get("zero_optimization", {}),
+                    train_micro_batch_size_per_gpu=ds_dict.get("train_micro_batch_size_per_gpu"),
+                    activation_checkpointing=ds_dict.get("activation_checkpointing"),
+                )
 
 def load_and_verify(method: str, input_yaml: str, experiment_id: str, world_size: int | None = None):
     '''
