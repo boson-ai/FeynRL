@@ -142,9 +142,6 @@ def rollout_engine_setup(params, reward_fnc, eos_id):
               "reward_broadcast":params.reward.broadcast,
               "eps_reward_norm":params.reward.eps_reward_norm,
 
-              # reference model
-              "ref_model_path":params.model.ref_model if params.model.ref_model else None,
-              "ref_model_dtype":safe_string_to_torch_dtype(params.model.dtype),
             }
 
     num_rollout_engines = max(1, rollout_gpus // tp)
@@ -316,13 +313,10 @@ if __name__ == "__main__":
     ########
     logger.info(f"Setting up training algorithm: {config.train.alg_name}")
     alg_name = str.lower(config.train.alg_name)
-    if alg_name in {'ppo', 'sgrpo', 'cispo'}:
+    if alg_name in {'sgrpo', 'cispo'}:
         if alg_name == 'sgrpo':
             import algs.SGRPO.sgrpo as calg
             alg = calg.SGRPO
-        elif alg_name == 'ppo':
-            import algs.PPO.ppo as calg
-            alg = calg.PPO
         elif alg_name == 'cispo':
             import algs.CISPO.cispo as calg
             alg = calg.CISPO

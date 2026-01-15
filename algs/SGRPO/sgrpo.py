@@ -24,6 +24,7 @@ class SGRPO:
                  deepspeed_ref_config = None,
                  ):
 
+        self.alg_name = self.__class__.__name__
         # model related parameters
         self.model_path = model_path
         self.ref_model_path = ref_model_path
@@ -53,7 +54,6 @@ class SGRPO:
         self.ready = False
         self.init_training_engine()
         self.ready = True
-        self.alg_name = self.__class__.__name__
 
     def is_ready(self):
         '''
