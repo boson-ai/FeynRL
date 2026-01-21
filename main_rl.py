@@ -207,7 +207,7 @@ def collect_rollouts(rollout_dataloader,
     '''
         This function is used to run rollout engine and generate rollouts/samples.
     '''
-    assert num_rollout_engines == len(rollout_engines), 'Number of rollout engines does not match with the number of rollout engines'
+    assert num_rollout_engines == len(rollout_engines), 'num_rollout_engines does not match with len(rollout_engines)'
 
     rollout_start_time = time.time()
     total_samples_generated = 0
@@ -268,6 +268,16 @@ def collect_rollouts(rollout_dataloader,
             "avg_reward": avg_reward,
             "avg_response_len": avg_response_len,
             "rollout_time": rollout_time}
+
+def refresh_rollout_engine(ray_agent, rollout_engines, updated_policy_path, version):
+    '''
+        Refresh rollout engine with the latest policy.
+    '''
+    refresh_futures = []
+    for eng in rollout_engines:
+        refresh_futures.append(eng.refresh_model.remote(updated_policy_path, version))
+
+    ray_agent.get(refresh_futures)
 
 if __name__ == "__main__":
     # parse arguments
@@ -565,11 +575,11 @@ if __name__ == "__main__":
         # Refresh rollout policy
         ################
         logger.info(f"[Epoch {epoch+1}] Refreshing rollout engines with new policy (version {policy_version})...")
-        refresh_futures = []
-        for eng in rollout_engines:
-            refresh_futures.append(eng.refresh_model.remote(model_path, policy_version))
+        refresh_rollout_engine(ray_agent=ray,
+                               rollout_engines=rollout_engines,
+                               updated_policy_path=model_path,
+                               policy_version=policy_version)
 
-        ray.get(refresh_futures)
         logger.info(f"[Epoch {epoch+1}] Rollout engines refreshed")
 
         logger.info(f"[Epoch {epoch+1}] Complete! Total epoch time: {epoch_time:.2f}s")
