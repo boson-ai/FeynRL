@@ -53,6 +53,8 @@ class PPO:
 
         # value model params
         self.vf_clip = float(vf_clip)
+        self.tau = float(tau)
+        self.gamma = float(gamma)
 
         # use cross entropy loss for policy gradient
         self.cross_entropy = torch.nn.CrossEntropyLoss(reduction="none")
@@ -91,8 +93,8 @@ class PPO:
         pi_model, ref_model, val_model = self.load_model()
         print(f"[Alg:{self.alg_name}][Rank {rank}] Models loaded: {self.pi_model_path} {self.vf_model_path} {self.ref_model_path}")
 
-        # 2. Initialize model engine
-        self.policy_engine, self.optimizer, _, _ = deepspeed.initialize(
+        # 2. Initialize policy model engine
+        self.policy_engine, self.policy_optimizer, _, _ = deepspeed.initialize(
                                                             model=pi_model,
                                                             model_parameters=pi_model.parameters(),
                                                             config=ds_config_dict
@@ -110,8 +112,8 @@ class PPO:
                                                             )
             print(f"[Alg:{self.alg_name}][Rank {rank}] Reference model initialized with DeepSpeed")
 
-        # 3. Initialize model engine
-        self.value_engine, self.optimizer, _, _ = deepspeed.initialize(
+        # 3. Initialize value model engine
+        self.value_engine, self.value_optimizer, _, _ = deepspeed.initialize(
                                                                     model=val_model,
                                                                     model_parameters=val_model.parameters(),
                                                                     config=ds_config_dict
@@ -122,13 +124,13 @@ class PPO:
         '''
             Load models and tokenizer from huggingface.
         '''
-        assert self.model_dtype != 'auto', "dtype must not be auto to avoid any precision issues"
+        assert self.pi_dtype != 'auto', "dtype must not be auto to avoid any precision issues"
         assert self.attn_impl=='' or self.attn_impl in ['eager', 'flash_attention_2'], "attn_impl must be one of 'eager', 'flash_attention_2' or empty string"
 
         # 1. model and its config initialization
-        policy_config = AutoConfig.from_pretrained(self.model_path)
-        policy_model = AutoModelForCausalLM.from_pretrained(self.model_path,
-                                                    dtype=self.model_dtype,
+        policy_config = AutoConfig.from_pretrained(self.pi_model_path)
+        policy_model = AutoModelForCausalLM.from_pretrained(self.pi_model_path,
+                                                    dtype=self.pi_dtype,
                                                     trust_remote_code=self.trust_remote_code,
                                                     config=policy_config,
                                                     attn_implementation=None if self.attn_impl == '' else self.attn_impl)
@@ -137,7 +139,7 @@ class PPO:
         if self.ref_model_path and self.kl_coeff > 0.0:
             ref_config = AutoConfig.from_pretrained(self.ref_model_path)
             ref_model = AutoModelForCausalLM.from_pretrained(self.ref_model_path,
-                                                            dtype=self.model_dtype,
+                                                            dtype=self.pi_dtype,
                                                             trust_remote_code=self.trust_remote_code,
                                                             config=ref_config,
                                                             attn_implementation=None if self.attn_impl == '' else self.attn_impl)
@@ -148,7 +150,7 @@ class PPO:
         # load value network
         val_config = AutoConfig.from_pretrained(self.vf_model_path)
         value_model = AutoModelForCausalLM.from_pretrained(self.vf_model_path,
-                                                    dtype=self.val_dtype,
+                                                    dtype=self.vf_dtype,
                                                     trust_remote_code=self.trust_remote_code,
                                                     config=val_config,
                                                     attn_implementation=None if self.attn_impl == '' else self.attn_impl)
@@ -461,7 +463,7 @@ class PPO:
             # 4. log how much things are changed
             with torch.no_grad():
                 vf_clipfrac = (values - v_old).abs() > self.vf_clip
-                vf_clipfrac = (vf_clipfrac * mask).sum() / denom
+                vf_clipfrac = ((vf_clipfrac.to(dtype=dtype) * mask).sum() / denom).item()
 
         else:
             loss = 0.5 * (v_loss * mask).sum() / denom
@@ -507,7 +509,8 @@ class PPO:
         ga_pi = int(ga_pi_attr() if callable(ga_pi_attr) else ga_pi_attr)
 
         # track metrics across all micro-batches
-        all_metrics = []
+        all_metrics_policy = []
+        all_metrics_value = []
         for step, micro_batch in enumerate(progress_bar):
             is_last = (step == (num_micro - 1))
             is_boundary = (((step + 1) % ga_pi) == 0) or is_last
@@ -516,32 +519,32 @@ class PPO:
             # 1. Data from buffer
             ########
             # all are [B, T]
-            # zscore is normalized rewards using the number of samples for each proompt (X -mu) / (std + eps)
-            # this is a simple baseline for policy gradients (PPO in this code) as it reflects relative quality
-            # among that prompt’s samples.
-            rewards   = micro_batch['rewards'][:, :-1].to(device, non_blocking=True)
+            rewards   = micro_batch['rewards'][:, 1:].to(device, non_blocking=True)
             done      = micro_batch['done'][:, :-1].to(device, non_blocking=True)
             mask      = micro_batch['mask'][:, :-1].to(device, non_blocking=True)
             old_logprobs = micro_batch['old_logprobs'][:, :-1].to(device, non_blocking=True)
 
-            # PPO-specific: values and last_val from vLLM rollout
-            values    = micro_batch.get('v_olds', None)
-            if values is not None:
-                values = values[:, :-1].to(device, non_blocking=True)
-            last_val  = micro_batch.get('last_val', None)
-            if last_val is not None:
-                last_val = last_val[:, :-1].to(device, non_blocking=True)
+            # we need old values from rollout for advantage computation.
+            v_olds_full = micro_batch.get('v_olds', None)
+            last_val_full = micro_batch.get('last_val', None)
+
+            if v_olds_full is None or last_val_full is None:
+                raise ValueError("Missing v_olds and last_val from rollout buffer.")
+
+            # Slice v_olds to match prediction alignment [B, T] -> [B, T-1]
+            v_olds = v_olds_full[:, :-1].to(device, non_blocking=True)
+            last_val = last_val_full.to(device, non_blocking=True)
 
             input_ids = micro_batch['input_ids'].to(device, non_blocking=True)
             att_mask  = micro_batch['attn_mask'].to(device, non_blocking=True)
             pos_ids   = micro_batch.get('position_ids', None)
 
             ########
-            # 2. Compute adavnatage
+            # 2. Compute advantages
             ########
-            returns, advs = self.compute_advantages(
-                                                    rewards=rewards,
-                                                    values=values,
+
+            returns, advs = self.compute_advantages(rewards=rewards,
+                                                    values=v_olds,
                                                     done=done,
                                                     mask=mask,
                                                     last_val=last_val)
@@ -571,7 +574,7 @@ class PPO:
                                                            ref_logprobs=ref_logprobs)
 
             # store metrics
-            all_metrics.append(pi_metrics)
+            all_metrics_policy.append(pi_metrics)
             if engine_id == 0:
                 progress_bar.set_postfix({
                     "loss": f"{pi_loss.item():.4f}",
@@ -595,25 +598,24 @@ class PPO:
             # 3. Compute value loss
             ########
             # Forward pass through the value function.
-            values = self.value_forward(input_ids=input_ids,
-                                        att_mask=att_mask,
-                                        pos_ids=pos_ids)
+            values, _ = self.value_forward(input_ids=input_ids,
+                                           att_mask=att_mask,
+                                           pos_ids=pos_ids)
 
-            # Compute value loss
+            # Compute value loss with clipping
             v_loss, v_metrics = self.compute_value_loss(values=values,
+                                                        v_old=v_olds,
                                                         returns=returns,
-                                                        mask=mask,
-                                                        is_boundary=is_boundary,
-                                                        device=device)
+                                                        mask=mask)
 
             # store metrics
-            all_metrics.append(v_metrics)
+            all_metrics_value.append(v_metrics)
             if engine_id == 0:
                 progress_bar.set_postfix({
-                    "loss": f"{v_loss.item():.4f}",
-                    "clip": f"{v_metrics['clipfrac']:.3f}",
-                    "kl_old": f"{v_metrics['kl_old']:.4f}",
-                    "kl_ref": f"{v_metrics['kl_ref']:.4f}"
+                    "v_loss": f"{v_loss.item():.4f}",
+                    "vf_clipfrac": f"{v_metrics['vf_clipfrac']:.3f}",
+                    "pi_loss": f"{pi_loss.item():.4f}",
+                    "kl_old": f"{pi_metrics['kl_old']:.4f}"
                 })
 
             if self.update_only_after_full_replay:
@@ -627,15 +629,91 @@ class PPO:
             self.value_engine.backward(v_loss)
             self.value_engine.step()
 
-        # aggregate metrics across all micro-batches
-        aggregated_metrics_policy = {}
+        # aggregate metrics across all micro-batches into a single dict
+        aggregated_metrics = {}
+
+        # Add policy metrics with 'policy_' prefix
         if all_metrics_policy:
             for key in all_metrics_policy[0].keys():
-                aggregated_metrics_policy[key] = np.mean([m[key] for m in all_metrics_policy])
+                aggregated_metrics[f'policy_{key}'] = np.mean([m[key] for m in all_metrics_policy])
 
-        aggregated_metrics_value = {}
+        # Add value metrics with 'value_' prefix
         if all_metrics_value:
             for key in all_metrics_value[0].keys():
-                aggregated_metrics_value[key] = np.mean([m[key] for m in all_metrics_value])
+                aggregated_metrics[f'value_{key}'] = np.mean([m[key] for m in all_metrics_value])
 
-        return aggregated_metrics_policy, aggregated_metrics_value
+        return aggregated_metrics
+
+    def save_checkpoint(self, policy_output_dir: str, value_output_dir: str, tag: str):
+        '''
+            Saves both policy and value models in hf compatible format for vllm, etc.
+            We rely on save_16bit_model which handles gathering partitioned weights in zero-3.
+
+            Note we must call this on ALL ranks for zero-3 correctness.
+        '''
+        rank = torch.distributed.get_rank()
+        print(f"[Alg:{self.alg_name}][Rank {rank}] Saving checkpoint to {policy_output_dir} and {value_output_dir} with tag {tag}...")
+
+        try:
+            # 1. Save policy model weights (gathered fp16/bf16)
+            # save_16bit_model internally handles zero-3 gathering from all ranks
+            self.policy_engine.save_16bit_model(policy_output_dir)
+
+            # Barrier to ensure all ranks finished writing before rank 0 saves config
+            # Without this, rank 0 might save config before other ranks write their shards
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+
+            # 2. Save policy config (required for vllm) on rank 0 ONLY
+            if rank == 0:
+                if hasattr(self.policy_engine.module, 'config'):
+                    self.policy_engine.module.config.save_pretrained(policy_output_dir)
+                    print(f"[Alg:{self.alg_name}][Rank {rank}] Policy config saved")
+
+                else:
+                    # fallback by trying to get config from the model itself
+                    if hasattr(self.policy_engine.module, 'module'):
+                        # wrapped model e.g., deepspeed wrapper
+                        if hasattr(self.policy_engine.module.module, 'config'):
+                            self.policy_engine.module.module.config.save_pretrained(policy_output_dir)
+                            print(f"[Alg:{self.alg_name}][Rank {rank}] Policy config saved (fallback)")
+
+            # make sure rank 0 finished writing policy config
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+
+            # 3. Save value model weights (gathered fp16/bf16)
+            self.value_engine.save_16bit_model(value_output_dir)
+
+            # Barrier to ensure all ranks finished writing before rank 0 saves config
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+
+            # 4. Save value config on rank 0 ONLY
+            if rank == 0:
+                if hasattr(self.value_engine.module, 'config'):
+                    self.value_engine.module.config.save_pretrained(value_output_dir)
+                    print(f"[Alg:{self.alg_name}][Rank {rank}] Value config saved")
+
+                else:
+                    # fallback by trying to get config from the model itself
+                    if hasattr(self.value_engine.module, 'module'):
+                        # wrapped model e.g., deepspeed wrapper
+                        if hasattr(self.value_engine.module.module, 'config'):
+                            self.value_engine.module.module.config.save_pretrained(value_output_dir)
+                            print(f"[Alg:{self.alg_name}][Rank {rank}] Value config saved (fallback)")
+
+            # make sure rank 0 finished writing value config
+            # this ensures vllm refresh can safely read all files
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Checkpoint save completed!")
+
+        except Exception as e:
+            # log error but don't crash allows other ranks to continue
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving checkpoint: {e}")
+            if torch.distributed.is_initialized():
+                # still need barrier even on error to prevent deadlock
+                torch.distributed.barrier()
+            raise
