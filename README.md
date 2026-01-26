@@ -21,8 +21,20 @@ To make things easier, we provide scripts and selected results on a few datasets
 
 ### Installation
 
-TODO
 
+
+#### Prerequisites
+
+- **NVIDIA CUDA Toolkit = 12.2**: ensure `nvcc --version` reports CUDA 12.2 and your NVIDIA driver is compatible.
+- **uv installed**: follow the official install instructions in `https://docs.astral.sh/uv/`.
+
+#### Install dependencies
+
+From the repo root:
+
+```bash
+uv sync
+```
 ## Contributing
 
 Contributions are welcome. Please keep changes easy to understand, test, and debug, and follow the existing style.

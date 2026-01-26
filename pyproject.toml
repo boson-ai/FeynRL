@@ -1,0 +1,33 @@
+[project]
+name = "leanrl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+   "datasets>=4.5.0",
+   "deepspeed>=0.18.4",
+   "huggingface-hub>=0.36.0",
+   "mlflow>=3.8.1",
+   "pydantic>=2.12.5",
+   "pyyaml>=6.0.3",
+   "torch==2.8.*",
+   "torchvision==0.23.*",
+   "transformers>=4.57.6",
+   "vllm",
+   "flash-attn"
+]
+
+[tool.uv]
+no-build-isolation-package = ["flash-attn"]
+
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
