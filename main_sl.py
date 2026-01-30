@@ -399,8 +399,18 @@ if __name__ == "__main__":
         model_path = get_experiment_dir_name(output_dir=config.run.checkpoint_dir, tag=tag, experiment_id=config.run.experiment_id)
         logger.info(f"[Epoch {epoch+1}] Saving checkpoint to {model_path}")
 
-        # DeepSpeed handles the collective saving internally so we don't need to worry about different ranks.
-        model_engine.save_checkpoint(model_path)
+        # Save as HuggingFace format
+        model_engine.save_16bit_model(model_path)
+
+        # Barrier to ensure all ranks finished writing before rank 0 saves config
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+        # Save model config on rank 0 only
+        if rank == 0:
+            if hasattr(model_engine.module, 'config'):
+                model_engine.module.config.save_pretrained(model_path)
+                logger.info(f"[Epoch {epoch+1}] Model config saved")
 
         # Wait for saving to complete on all ranks
         if torch.distributed.is_initialized():
