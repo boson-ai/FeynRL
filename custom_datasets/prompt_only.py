@@ -12,6 +12,7 @@ class PromptOnlyDataset(Dataset):
                 max_seq_len: int,
                 data_path: str,
                 return_text: bool=False,
+                return_answer: bool=True,
                 ):
         assert prompt_key != "", "prompt_key cannot be empty"
         assert max_seq_len > 0, "max_seq_len must be > 0"
@@ -26,6 +27,7 @@ class PromptOnlyDataset(Dataset):
         self.tokenizer   = tokenizer
         self.data_path   = data_path
         self.return_text = return_text
+        self.return_answer = return_answer
         self._load_data()
 
     def _load_data(self):
@@ -78,18 +80,24 @@ class PromptOnlyDataset(Dataset):
             raise ValueError(f"Prompt in sample {idx}:{sample}: too long: "
                              f"prompt must be at most {self.max_seq_len} tokens (got {len(prompt_ids)})")
 
-        if self.return_text == False:
-            return {"prompt_token_ids": prompt_ids}
 
-        # Get the prompt text for debugging. it can be used for vLLM rollout too
-        prompt_text = self.tokenizer.apply_chat_template(
+        outputs = {"prompt_token_ids": prompt_ids}
+        if self.return_answer:
+            answer = sample["answer"]
+            answer_ids = self.tokenizer.encode(answer, add_special_tokens=False)
+            outputs["answer_token_ids"] = answer_ids
+            
+        if self.return_text == True:
+            # Get the prompt text for debugging. it can be used for vLLM rollout too
+            prompt_text = self.tokenizer.apply_chat_template(
                                         conversation=message,
                                         add_generation_prompt=True,
                                         tokenize=False,
                                         return_tensors=None,
                                         )
+            outputs["text"] = prompt_text
 
-        return  {"prompt_token_ids": prompt_ids, "text": prompt_text}
+        return  outputs
 
     def __len__(self):
         return self.len_data
