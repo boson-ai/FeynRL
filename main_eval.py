@@ -194,6 +194,7 @@ def collect_rollouts(dataloader,
             for sample in rl:
                 total_samples_generated += 1
                 total_reward_sum += sample['rewards'].sum().item()
+                logger.info(f"Sample reward: {sample['rewards'].sum().item()}")
                 total_response_len += sample['response_len']
 
         # 5. now add them to replay buffer
