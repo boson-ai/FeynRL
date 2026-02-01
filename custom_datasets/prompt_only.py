@@ -12,7 +12,7 @@ class PromptOnlyDataset(Dataset):
                 max_seq_len: int,
                 data_path: str,
                 return_text: bool=False,
-                return_answer: bool=True,
+                return_answer: bool=False,
                 ):
         assert prompt_key != "", "prompt_key cannot be empty"
         assert max_seq_len > 0, "max_seq_len must be > 0"
@@ -86,7 +86,7 @@ class PromptOnlyDataset(Dataset):
             answer = sample["answer"]
             answer_ids = self.tokenizer.encode(answer, add_special_tokens=False)
             outputs["answer_token_ids"] = answer_ids
-            
+
         if self.return_text == True:
             # Get the prompt text for debugging. it can be used for vLLM rollout too
             prompt_text = self.tokenizer.apply_chat_template(
