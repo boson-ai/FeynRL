@@ -97,6 +97,7 @@ class Data(BaseModel):
     max_seq_len: int
     prompt_key: str
     answer_key: str
+    solution_key: str = None
 
 class Model(BaseModel):
     '''
