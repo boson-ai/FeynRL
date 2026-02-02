@@ -171,6 +171,7 @@ def create_rollout_dataloader(params, tokenizer, num_rollout_engines):
                             max_seq_len=params.data.max_seq_len,
                             tokenizer=tokenizer,
                             data_path=params.data.train_files_path,
+                            solution_key=params.data.solution_key,
                             return_text=False)
 
     # since we split the data across the rollout engines
