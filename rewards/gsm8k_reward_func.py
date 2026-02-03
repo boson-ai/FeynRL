@@ -46,14 +46,8 @@ def compute_score(prompt_data: Dict[str, Any], response_data: Dict[str, Any], me
     solution_str = response_data.text
     ground_truth = prompt_data["solution"]
 
-    
-
     r = torch.zeros((len(response_data.token_ids),), dtype=torch.float32)
     answer = extract_solution(solution_str=solution_str, method=method)
-
-    print(f"solution_str = {solution_str}")
-    print(f"ground_truth = {ground_truth}")
-    print(f"answer = {answer}")
 
     is_per_token = False
 
