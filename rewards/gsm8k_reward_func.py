@@ -12,15 +12,15 @@ def extract_solution(solution_str, clip_chars=300):
 
     # this also tests the formatting of the model
     solutions = re.search("#### (\-?[0-9\.\,]+)", solution_str)
-    if len(solutions) == 0:
+    if solutions is None:
         final_answer = None
     else:
         # take the last solution
-        final_answer = solutions[-1].replace(",", "").replace("$", "")
+        final_answer = solutions.group(1).replace(",", "").replace("$", "")
 
     return final_answer
 
-def compute_score(prompt_data: Dict[str, Any], response_data: Dict[str, Any], method="flexible", format_score=0.0, score=1.0):
+def compute_score(prompt_data: Dict[str, Any], response_data: Dict[str, Any], format_score=0.0, score=1.0):
     '''
       input args:
         reward_data: Dict[str, Any] - dictionary containing reward data
@@ -32,7 +32,7 @@ def compute_score(prompt_data: Dict[str, Any], response_data: Dict[str, Any], me
     ground_truth = prompt_data["solution"]
 
     r = torch.zeros((len(response_data.token_ids),), dtype=torch.float32)
-    answer = extract_solution(solution_str=solution_str, method=method)
+    answer = extract_solution(solution_str=solution_str)
 
     is_per_token = False
 

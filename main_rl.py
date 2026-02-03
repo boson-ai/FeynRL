@@ -4,12 +4,11 @@ import numpy as np
 import argparse
 import importlib
 import torch
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
+from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 import ray
 import time
 import mlflow
-from tqdm import tqdm
 
 # imports local methods, classes, etc.
 import configs.load as cfg # all config arguments
@@ -227,8 +226,7 @@ def collect_rollouts(dataloader,
                 f"Samples this epoch: {samples_per_epoch}")
 
 
-    tqdm_dataloader = tqdm(dataloader, desc="Rollout", total=num_batches_per_epoch)
-    for rollout_batch in tqdm_dataloader:
+    for rollout_batch in dataloader:
         # 1. split data across rollout engines
         # recall: num_rollout_engines  = max(1, int(rollout_gpus) // tensor_parallel_size)
         # and rollout_batch is a list of dictionaries.
@@ -325,7 +323,7 @@ def run_training_step(engines, batches):
             'kl_old': np.mean([m.get('kl_old', 0.0) for m in metrics_list]),
             'clipfrac': np.mean([m.get('clipfrac', 0.0) for m in metrics_list])}
 
-def save_checkpoint(epoch, version, tokenizer, training_engines, checkpoint_dir, experiment_id, rank, logger, base_model_name=None):
+def save_checkpoint(epoch, version, tokenizer, training_engines, checkpoint_dir, experiment_id, rank, logger):
     '''
        Save model checkpoint (must run on all ranks for ZeRO-3)
     '''
@@ -595,8 +593,7 @@ if __name__ == "__main__":
                                      checkpoint_dir=config.run.checkpoint_dir,
                                      experiment_id=config.run.experiment_id,
                                      rank=rank,
-                                     logger=logger,
-                                     base_model_name=config.model.name)
+                                     logger=logger)
         ################
         # 6. Refresh rollout policy
         ################
