@@ -109,21 +109,7 @@ class PromptsFeed(Dataset):
             Otherwise, we will get all sequences must have equal size error.
             This function keeps variable-length items as python objects
         '''
-
-        prompt_token_ids = []
-        prompt_texts = []
-        solutions = []
-
-        for x in batch:
-            prompt_token_ids.append(x["prompt_token_ids"])
-            prompt_texts.append(x["text"])
-            if self.solution_key:
-                solutions.append(x["solution"])
-
-        if self.solution_key:
-            return prompt_token_ids, prompt_texts, solutions
-
-        return prompt_token_ids, prompt_texts
+        return batch
 
 if __name__ == "__main__":
     '''
