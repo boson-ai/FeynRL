@@ -162,13 +162,18 @@ def load_tokenizer(model_name, trust_remote_code=False, rank=0):
 
     return tokenizer
 
-def create_rollout_dataloader(params, tokenizer, num_rollout_engines, steps_per_epoch):
+def create_rollout_dataloader(params, tokenizer, num_rollout_engines, samples_per_epoch):
     '''
        This dataloader is used for rollout generation which
        would be used to train the policy.
        Uses MixedDatasetSampler for mixed sampling across datasets.
     '''
+    if samples_per_epoch <= 0:
+        raise ValueError(f"samples_per_epoch must be > 0, got {samples_per_epoch}")
+
     bsz = num_rollout_engines * params.rollout.rollout_batch_size_per_gpu
+    # Calculate number of batches from total samples
+    num_batches = (samples_per_epoch + bsz - 1) // bsz
 
     dataset, sampler, collate_fn = create_prompt_dataset_and_sampler(
                                                 data_paths=params.data.train_files_path,
@@ -180,7 +185,7 @@ def create_rollout_dataloader(params, tokenizer, num_rollout_engines, steps_per_
                                                 seed=params.run.seed,
                                                 local_batch_size=bsz,
                                                 dataset_cls=PromptsFeed,
-                                                steps_per_epoch=steps_per_epoch,
+                                                steps_per_epoch=num_batches,
                                                 shuffle_within_batch=True,
                                                 dynamic_ratio_every_step=params.train.dynamic_ratio_every_step,
                                                 )
@@ -210,13 +215,15 @@ def collect_rollouts(dataloader,
     total_reward_sum = 0.0
     total_response_len = 0
 
+    # example: 2 rollout engines * 8 batch_size_per_gpu = 16 batch_size
+    # rollout_samples_per_epoch=100 -> ceil(100/16)=7 batches -> 112 actual samples
     batch_size = dataloader.batch_sampler.local_batch_size
-    dataset_size = len(dataloader.dataset)
     num_batches_per_epoch = len(dataloader)
+    samples_per_epoch = num_batches_per_epoch * batch_size
 
-    logger.info(f"[Rollout] Dataset: {dataset_size}, Batch: {batch_size} "
-                f"({num_rollout_engines} engines × {batch_size // num_rollout_engines} per engine), "
-                f"Batches this epoch: {num_batches_per_epoch}")
+    logger.info(f"[Rollout] Batch: {batch_size} "
+                f"({num_rollout_engines} engines * {batch_size // num_rollout_engines} per engine), "
+                f"Samples this epoch: {samples_per_epoch}")
 
     for rollout_batch in dataloader:
         # 1. split data across rollout engines
@@ -450,7 +457,7 @@ if __name__ == "__main__":
     rollout_dataloader = create_rollout_dataloader(params=config,
                                                   tokenizer=tokenizer,
                                                   num_rollout_engines=num_rollout_engines,
-                                                  steps_per_epoch=config.rollout.rollout_batches_per_epoch)
+                                                  samples_per_epoch=config.rollout.rollout_samples_per_epoch)
 
     logger.info(f"Rollout dataloader ready. Total batches per epoch: {len(rollout_dataloader)}")
     replay_buffer = ReplayBuffer(pad_token_id=tokenizer.pad_token_id,

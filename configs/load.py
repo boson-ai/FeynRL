@@ -192,7 +192,7 @@ class Rollout(BaseModel):
     force_strict_on_policy: bool | None = None
     tensor_parallel_size: int | None = None
     rollout_batch_size_per_gpu: int | None = None
-    rollout_batches_per_epoch: int | None = None
+    rollout_samples_per_epoch: int | None = None
 
 class Config(BaseModel):
     '''
