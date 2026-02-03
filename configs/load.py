@@ -88,16 +88,15 @@ class Data(BaseModel):
         Everything related to data goes here.
     '''
     model_config = ConfigDict(extra='forbid')
-    train_dnames: list[str] = None
     train_ratios: dict[str, float] = None
-    train_files_path: str = None
-    val_files_path: str = None
+    train_files_path: list[str] = None
+    val_files_path: list[str] = None
     test_files_path: str = None
     num_workers: int
     max_seq_len: int
     prompt_key: str
     answer_key: str
-    solution_key: str = None
+    solution_key: str | None = None
 
 class Model(BaseModel):
     '''
