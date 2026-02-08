@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.distributed
 from transformers import AutoModelForCausalLM, AutoConfig
@@ -59,6 +60,11 @@ class COMMON:
             # SGRPO/CISPO case
             print(f"[Alg:{self.alg_name}][Rank {rank}] Model loaded: {self.model_path}")
 
+        # Enable gradient checkpointing on the HF model before DS wrapping
+        if self.gradient_checkpointing:
+            policy_model.gradient_checkpointing_enable()
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Gradient checkpointing enabled")
+
         # Initialize policy engine
         self.policy_engine, self.policy_optimizer , _, _ = deepspeed.initialize(
                                                         model=policy_model,
@@ -100,10 +106,11 @@ class COMMON:
             pos_ids = pos_ids.to(input_ids.device)
 
         # feed data to model
+        # use_cache=False: KV cache is never useful during training
         output = self.policy_engine(input_ids=input_ids,
                                    attention_mask=att_mask,
                                    position_ids=pos_ids,
-                                   use_cache=self.use_cache)
+                                   use_cache=False)
 
         # [B, T, V] -> [B, T-1, V]
         logits = output.logits[:, :-1, :].contiguous()
@@ -140,10 +147,11 @@ class COMMON:
             if pos_ids is not None:
                 pos_ids = pos_ids.to(input_ids.device)
 
+            # use_cache=False: full-sequence forward
             output = self.ref_model_engine(input_ids=input_ids,
                                            attention_mask=att_mask,
                                            position_ids=pos_ids,
-                                           use_cache=self.use_cache)
+                                           use_cache=False)
 
             # [B, T, V] -> [B, T-1, V]
             logits = output.logits[:, :-1, :].contiguous()
@@ -186,6 +194,7 @@ class COMMON:
 
         try:
             # 1. Save policy model weights (gathered fp16/bf16)
+            # os.makedirs(output_dir, exist_ok=True)
             self.policy_engine.save_16bit_model(output_dir)
 
             # Barrier to ensure all ranks finished writing before rank 0 saves config
