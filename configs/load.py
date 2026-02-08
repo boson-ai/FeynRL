@@ -1,3 +1,4 @@
+import math
 from typing import Dict, Any
 from pydantic import BaseModel, Field, ConfigDict, ValidationError
 import yaml
@@ -26,6 +27,10 @@ class Run(BaseModel):
     overlap_enabled: bool | None = None # Enable overlap mode
     overlap_max_lag: int | None = None # Max training steps ahead of rollout policy version
     overlap_weight_update_interval: int | None = None # Update rollout weights every N training steps
+
+    # NCCL configuration for multi-node clusters with multiple NICs
+    # nccl_socket_ifname: str | None = None  # e.g., "eth0", "ens3", "bond0"
+    # nccl_ib_hca: str | None = None         # e.g., "mlx5_0" for InfiniBand HCA selection
 
 class Train(BaseModel):
     '''
@@ -108,7 +113,6 @@ class Model(BaseModel):
     ref_model: str = None
     ref_model_offload_to_cpu: bool = False
     trust_remote_code: bool
-    use_cache: bool = None
     model_class: str = None
     attn_implementation: str = None
     gradient_checkpointing: bool = None
@@ -223,9 +227,10 @@ class Config(BaseModel):
             self.deepspeed.train_micro_batch_size_per_gpu = self.train.train_batch_size_per_gpu
             self.deepspeed.gradient_accumulation_steps = self.train.gradient_accumulation_steps
 
-            # Explicitly calculate and set train_batch_size for DeepSpeed logging/sanity check
-            # This is only for SL training, for RL training we don't need that.
-            if world_size is not None and self.run.method == "sl":
+            # Explicitly calculate and set train_batch_size for DeepSpeed logging/sanity check.
+            # Without this, model_dump() emits train_batch_size: None which some DS
+            # versions misinterpret (key present with None vs key absent).
+            if world_size is not None:
                 self.deepspeed.train_batch_size = self.train.train_batch_size_per_gpu * self.train.gradient_accumulation_steps * world_size
 
             # 2 — Gradient Clipping
@@ -277,7 +282,19 @@ class Config(BaseModel):
                 else:
                     if self.train.train_steps_per_epoch is None:
                         raise ValueError("train_steps_per_epoch must be set for RL training")
-                    optimizer_steps_per_epoch = self.train.train_steps_per_epoch
+
+                    # When update_after_full_replay=True, each train_step call produces
+                    # exactly 1 optimizer step (boundary only on last micro-batch).
+                    # When False, each train_step produces ceil(micro_batches / ga_steps)
+                    # optimizer steps, so we must account for this multiplier.
+                    if self.train.update_after_full_replay:
+                        optimizer_steps_per_epoch = self.train.train_steps_per_epoch
+                    else:
+                        estimated_replay_size = self.rollout.rollout_samples_per_epoch * self.rollout.n_samples
+                        total_micro_batches = math.ceil(estimated_replay_size / self.train.train_batch_size_per_gpu)
+                        micro_batches_per_engine = math.ceil(total_micro_batches / world_size)
+                        opt_steps_per_train_step = math.ceil(micro_batches_per_engine / self.train.gradient_accumulation_steps)
+                        optimizer_steps_per_epoch = self.train.train_steps_per_epoch * opt_steps_per_train_step
 
                 total_optimizer_steps = self.train.total_number_of_epochs * optimizer_steps_per_epoch
                 warmup_steps = int(total_optimizer_steps * self.train.warmup_steps_ratio)
