@@ -21,10 +21,10 @@ class CISPO(COMMON):
                  clip_low: float,
                  clip_high: float,
                  entropy_coeff: float,
-                 use_cache: bool,
                  micro_batch_size_per_gpu: int,
                  update_after_full_replay: bool,
                  deepspeed_config: deepspeed.DeepSpeedConfig,
+                 gradient_checkpointing: bool,
                  ref_model_path: str = None,
                  deepspeed_ref_config = None,
                  ):
@@ -33,7 +33,6 @@ class CISPO(COMMON):
         # model related parameters
         self.model_path = model_path
         self.ref_model_path = ref_model_path
-        self.use_cache = use_cache
         self.attn_impl = attn_impl
         self.model_dtype = model_dtype
         self.trust_remote_code = trust_remote_code
@@ -42,6 +41,7 @@ class CISPO(COMMON):
         self.deepspeed_config = deepspeed_config
         self.deepspeed_ref_config = deepspeed_ref_config
         self.micro_batch_size_per_gpu = micro_batch_size_per_gpu
+        self.gradient_checkpointing = gradient_checkpointing
 
         # policy related parameters
         self.kl_coeff = float(kl_coeff)
