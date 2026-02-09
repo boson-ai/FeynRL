@@ -89,6 +89,8 @@ class PairedFeed(Dataset):
             }
           Loss is computed on all assistant responses including the final answer.
         '''
+        # Ensure native int: DataLoader/samplers may pass numpy.int64, which Dataset rejects
+        idx = int(idx)
         current_sample = self.data[idx]
 
         if self.prompt_key not in current_sample:
@@ -368,4 +370,29 @@ if __name__ == "__main__":
                       )
     dataloader = DataLoader(dataset, batch_size=3)
     for d in dataloader:
+        print(d)
+
+    from mixed_sampler import create_dataset_and_sampler
+    dataset, sampler = create_dataset_and_sampler(data_paths=["./promptonly.parquet"],
+                                                  prompt_key="prompt",
+                                                  answer_key="answer",
+                                                  max_seq_len=200,
+                                                  tokenizer=tokenizer,
+                                                  train_ratios={"promptonly":1},
+                                                  split="train",
+                                                  rank=0,
+                                                  world_size=1,
+                                                  seed=42,
+                                                  local_batch_size=3,
+                                                  dataset_cls=PairedFeed,
+                                                  steps_per_epoch=100,
+                                                  shuffle_within_batch=True,
+                                                  dynamic_ratio_every_step=False)
+
+    dummy_loader = DataLoader(dataset=dataset,
+                              batch_sampler=sampler,
+                              num_workers=0,
+                              pin_memory=True,
+                              worker_init_fn=None)
+    for d in dummy_loader:
         print(d)
