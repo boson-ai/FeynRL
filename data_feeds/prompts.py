@@ -147,3 +147,29 @@ if __name__ == "__main__":
     for d in dataloader:
         print(d)
         print("\n")
+
+    from mixed_sampler import create_prompt_dataset_and_sampler
+
+    concat_ds, sampler, collate_fn = create_prompt_dataset_and_sampler(data_paths=["./promptonly.parquet"],
+                                      prompt_key="prompt",
+                                      solution_key="solution",
+                                      max_seq_len=1024,
+                                      tokenizer=tokenizer,
+                                      train_ratios={"promptonly":1},
+                                      seed=42,
+                                      local_batch_size=3,
+                                      dataset_cls=PromptsFeed,
+                                      dynamic_ratio_every_step=False,
+                                      steps_per_epoch=3,
+                                      shuffle_within_batch=True,
+                                      )
+
+    dummy_loader = DataLoader(dataset=concat_ds,
+                            batch_sampler=sampler,
+                            num_workers=0,
+                            pin_memory=True,
+                            collate_fn=collate_fn,
+                            )
+
+    for d in dummy_loader:
+        print(d)
