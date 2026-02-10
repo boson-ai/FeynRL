@@ -169,13 +169,6 @@ class DeepSpeedRef(BaseModel):
     # Activation checkpointing (can help with memory)
     activation_checkpointing: Dict[str, Any] | None = None
 
-class InferenceEngine(BaseModel):
-    '''
-        Everything related to inference goes here.
-    '''
-    model_config = ConfigDict(extra='forbid')
-    name: str
-
 class Reward(BaseModel):
     '''
         Everything related to rewards (RL-specific).
@@ -216,7 +209,6 @@ class Config(BaseModel):
     model: Model | None = None
     data: Data | None = None
     deepspeed: DeepSpeed | None = None
-    inference_engine: InferenceEngine | None = None
     # RL-specific sections
     reward: Reward | None = None
     rollout: Rollout | None = None
