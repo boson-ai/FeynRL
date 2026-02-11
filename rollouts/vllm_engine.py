@@ -284,170 +284,194 @@ class VLLMRolloutEngine:
                 prompts: List[Dict[str, List[int]]],
                 current_iter: int,
                 policy_version: int) -> List[Dict[str, Any]]:
-        ''' 
-            prompts: Data provided by the dataloader. For example:
-                [{'prompt_token_ids': [2,..], 'solution': '1'}, {'prompt_token_ids': [...], 'solution': '2'}, ...]
-            Returns a list of rollout samples. length ~ B * n_samples.
+                ''' 
+                    prompts: Data provided by the dataloader. For example:
+                        [{'prompt_token_ids': [2,..], 'solution': '1'}, {'prompt_token_ids': [...], 'solution': '2'}, ...]
+                    Returns a list of rollout samples. length ~ B * n_samples.
 
-            token-aligned and prediction-aligned logprobs/mask/done are returned.
-            Prediction-aligned here means: logit position t predicts token at t+1 (SFT-style shift).
-        '''
-        if not isinstance(prompts, list) or len(prompts) == 0:
-            raise TypeError(f"prompts must be a non-empty list, got {type(prompts)}")
+                    token-aligned and prediction-aligned logprobs/mask/done are returned.
+                    Prediction-aligned here means: logit position t predicts token at t+1 (SFT-style shift).
+                '''
+                if not isinstance(prompts, list) or len(prompts) == 0:
+                    raise TypeError(f"prompts must be a non-empty list, got {type(prompts)}")
 
-        if self.force_strict_on_policy and int(policy_version) != int(self.loaded_version):
-            raise ValueError(
-                f"Off-policy rollout: policy_version={int(policy_version)} "
-                f"but loaded_version={int(self.loaded_version)}. ")
+                if self.force_strict_on_policy and int(policy_version) != int(self.loaded_version):
+                    raise ValueError(
+                        f"Off-policy rollout: policy_version={int(policy_version)} "
+                        f"but loaded_version={int(self.loaded_version)}. ")
 
-        assert self.vllm_engine is not None, f"{self.model_path} not loaded."
-        self.log(f"Generating completions for {len(prompts)} prompts with {self.n_samples} samples each")
+                assert self.vllm_engine is not None, f"{self.model_path} not loaded."
+                self.log(f"Generating completions for {len(prompts)} prompts with {self.n_samples} samples each")
 
-        generated_outputs = self.vllm_engine.generate(
-            prompts,
-            sampling_params=self.sampling_params,
-            use_tqdm=False
-        )
+                generated_outputs = self.vllm_engine.generate(
+                    prompts,
+                    sampling_params=self.sampling_params,
+                    use_tqdm=False
+                )
 
-        self.log(f"Generation complete for {len(prompts)} prompts")
+                self.log(f"Generation complete for {len(prompts)} prompts")
 
-        # -------------------------------
-        # batch-level accumulators
-        # -------------------------------
-        batch_num_prompts = 0
-        batch_num_passes  = 0
-        batch_rewards     = []
-        batch_lengths     = []
+                # -------------------------------
+                # batch-level accumulators
+                # -------------------------------
+                batch_num_prompts = 0
+                batch_num_passes  = 0
+                batch_rewards     = []
+                batch_lengths     = []
+                
+                # generated_outputs has prompt_ids and other outputs
+                # this works even if n_samples >= 1
+                rollout_samples = []
 
-        rollout_samples = []
+                for prompt_data, data in zip(prompts, generated_outputs):
+                    group_samples = []
+                    group_stats   = {'rewards': [], 'lengths': []}
 
-        for prompt_data, data in zip(prompts, generated_outputs):
-            group_samples = []
-            group_stats   = {'rewards': [], 'lengths': []}
+                    prompt_ids = list(data.prompt_token_ids or [])
+                    prompt_len = len(prompt_ids)
+                    if prompt_len == 0:
+                        raise ValueError(f"No prompt token ids found in generated output: {data}")
 
-            prompt_ids = list(data.prompt_token_ids or [])
-            prompt_len = len(prompt_ids)
-            if prompt_len == 0:
-                raise ValueError(f"No prompt token ids found in generated output: {data}")
+                    # --------------------------------
+                    # process generated responses
+                    # --------------------------------
+                    for response in data.outputs:
+                        response_ids = list(response.token_ids)
+                        response_len = len(response_ids)
+                        finish_reason = getattr(response, "finish_reason", None)
+                        stop_reason   = getattr(response, "stop_reason", None)
 
-            # --------------------------------
-            # process generated responses
-            # --------------------------------
-            for response in data.outputs:
-                response_ids = list(response.token_ids)
-                response_len = len(response_ids)
-                finish_reason = getattr(response, "finish_reason", None)
-                stop_reason   = getattr(response, "stop_reason", None)
+                        # all have length [T] and token_aligned as described above
+                        seq_len = prompt_len + response_len
+                        input_ids = torch.tensor(prompt_ids + response_ids, dtype=torch.int64, device='cpu')
 
-                seq_len = prompt_len + response_len
-                input_ids = torch.tensor(prompt_ids + response_ids, dtype=torch.int64, device='cpu')
+                        token_masks        = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
+                        token_dones        = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
+                        token_old_logprobs = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
 
-                token_masks        = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
-                token_dones        = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
-                token_old_logprobs = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
+                        # prediction-level
+                        pred_masks         = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
+                        pred_dones         = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
+                        pred_old_logprobs  = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
 
-                pred_masks         = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
-                pred_dones         = torch.zeros((seq_len,), dtype=torch.int32, device='cpu')
-                pred_old_logprobs  = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
+                        rewards = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
 
-                rewards = torch.zeros((seq_len,), dtype=torch.float32, device='cpu')
+                        # it is important to score the response regardless of its length if it is empty
+                        rewards_resp, is_per_token = self.score_response(prompt_data, response)
+                        rewards[prompt_len:] = rewards_resp
 
-                # score response
-                rewards_resp, is_per_token = self.score_response(prompt_data, response)
-                rewards[prompt_len:] = rewards_resp
+                        group_stats['rewards'].append(rewards_resp.sum().item())
+                        group_stats['lengths'].append(response_len)
 
-                group_stats['rewards'].append(rewards_resp.sum().item())
-                group_stats['lengths'].append(response_len)
+                        if response_len > 0:
+                            if response.logprobs is None:
+                                raise ValueError(
+                                    "response.logprobs is None. "
+                                    "Check if SamplingParams(logprobs=1) is set."
+                                )
 
-                if response_len > 0:
-                    if response.logprobs is None:
-                        raise ValueError(
-                            "response.logprobs is None. "
-                            "Check if SamplingParams(logprobs=1) is set."
-                        )
+                            # token-aligned
+                            token_masks[prompt_len:] = 1
+                            response_logprobs = self.extract_logprobs(response_ids, response.logprobs)
+                            token_old_logprobs[prompt_len:] = response_logprobs
 
-                    # token-aligned
-                    token_masks[prompt_len:] = 1
-                    response_logprobs = self.extract_logprobs(response_ids, response.logprobs)
-                    token_old_logprobs[prompt_len:] = response_logprobs
+                            #####
+                            # pred-aligned
+                            #####
+                            # To recall how autoregressive models work:
+                            # - response token j is at token index prompt_len + j in input_ids
+                            # - and this is predicted by logits index prompt_len + j - 1
+                            # pred_aligned which would be one we will use in policy update
+                            # and to avoid any weired indexing later in the training loop.
+                            pred_start = prompt_len - 1
+                            pred_end   = seq_len - 1
+                            pred_masks[pred_start:pred_end] = 1
+                            pred_old_logprobs[pred_start:pred_end] = response_logprobs
 
-                    # pred-aligned
-                    pred_start = prompt_len - 1
-                    pred_end   = seq_len - 1
-                    pred_masks[pred_start:pred_end] = 1
-                    pred_old_logprobs[pred_start:pred_end] = response_logprobs
+                            # Terminal handling:
+                            #  1. stop: ended due to EOS or a stop condition so done should be 1.
+                            #  2. length: truncated which should not be done=1 and we need to bootstrap
+                            if finish_reason == "stop":
+                                token_dones[seq_len - 1] = 1
 
-                    if finish_reason == "stop":
-                        token_dones[seq_len - 1] = 1
-                        pred_dones[seq_len - 2] = 1
+                                # pred-aligned terminal is at the logit index that predicts last token
+                                # seq_len >= 2 is guaranteed since prompt_len >= 1 and response_len >= 1
+                                pred_dones[seq_len - 2] = 1
 
-                    eos_in_tokens = (response_ids[-1] == self.eos_id)
-                    ended_on_eos  = (finish_reason == "stop" and stop_reason is None and eos_in_tokens)
-                else:
-                    ended_on_eos = False
+                            # if stop_reason is None, it means it ended on eos
+                            # see here https://docs.vllm.ai/en/stable/api/vllm/outputs/#vllm.outputs.CompletionOutput
+                            eos_in_tokens = (response_ids[-1] == self.eos_id)
+                            ended_on_eos  = (finish_reason == "stop" and stop_reason is None and eos_in_tokens)
+                        else:
+                            ended_on_eos = False
 
-                group_samples.append({
-                    "iter": int(current_iter),
-                    "policy_version": int(policy_version),
-                    "loaded_version": int(self.loaded_version),
+                        # rollout sample in group if n_samples >= 1
+                        # I didn't drop response_len == 0 here as it can be useful for logging, or even reward normalization as
+                        # reward function should be designed in such way that it assigns negative rewards for example to empty responses.
+                        group_samples.append({
+                            "iter": int(current_iter),
+                            "policy_version": int(policy_version),
+                            "loaded_version": int(self.loaded_version),
+                            
+                            # token-aligned
+                            "input_ids": input_ids, #[T]
+                            "rewards": rewards, #[T]
+                            "zscores": rewards.clone(), #[T] if len(group_samples) > 1 it will be replaced in normalize_rewards
+                            "token_masks": token_masks, #[T] 1 on response/valid tokens
+                            "token_dones": token_dones, #[T] 1 on last token if terminal
+                            "token_old_logprobs": token_old_logprobs, #[T] 0 on prompt since we don't backprop on it.
 
-                    "input_ids": input_ids,
-                    "rewards": rewards,
-                    "zscores": rewards.clone(),
-                    "token_masks": token_masks,
-                    "token_dones": token_dones,
-                    "token_old_logprobs": token_old_logprobs,
+                            # pred-aligned
+                            "pred_masks": pred_masks, #[T]
+                            "pred_dones": pred_dones, #[T]
+                            "pred_old_logprobs": pred_old_logprobs, #[T]
 
-                    "pred_masks": pred_masks,
-                    "pred_dones": pred_dones,
-                    "pred_old_logprobs": pred_old_logprobs,
+                            "finish_reason": finish_reason,
+                            "stop_reason": stop_reason,
+                            "ended_on_eos": ended_on_eos,
 
-                    "finish_reason": finish_reason,
-                    "stop_reason": stop_reason,
-                    "ended_on_eos": ended_on_eos,
+                            "response_ids": response_ids, # list[int]
+                            "prompt_ids": prompt_ids, # list[int]
+                            "response_text": getattr(response, "text", ""),
+                            "response_len": response_len,
+                        })
 
-                    "response_ids": response_ids,
-                    "prompt_ids": prompt_ids,
-                    "response_text": getattr(response, "text", ""),
-                    "response_len": response_len,
-                })
+                    # --------------------------------
+                    # normalize rewards
+                    # --------------------------------
+                    self.normalize_rewards(
+                        samples=group_samples,
+                        stats=group_stats,
+                        prompt_len=prompt_len,
+                        is_per_token=is_per_token
+                    )
 
-            # --------------------------------
-            # normalize rewards
-            # --------------------------------
-            self.normalize_rewards(
-                samples=group_samples,
-                stats=group_stats,
-                prompt_len=prompt_len,
-                is_per_token=is_per_token
-            )
+                    # --------------------------------
+                    # pass@k (group-level)
+                    # --------------------------------
+                    k = len(group_stats['rewards'])
+                    passes = [r > 0 for r in group_stats['rewards']]
+                    pass_at_k = float(any(passes))
 
-            # --------------------------------
-            # pass@k (group-level)
-            # --------------------------------
-            k = len(group_stats['rewards'])
-            passes = [r > 0 for r in group_stats['rewards']]
-            pass_at_k = float(any(passes))
+                    group_mean_reward = float(
+                        sum(group_stats['rewards']) / max(1, len(group_stats['rewards']))
+                    )
 
-            group_mean_reward = float(
-                sum(group_stats['rewards']) / max(1, len(group_stats['rewards']))
-            )
+                    # batch aggregation
+                    batch_num_prompts += 1
+                    batch_num_passes  += pass_at_k
+                    batch_rewards.extend(group_stats['rewards'])
+                    batch_lengths.extend(group_stats['lengths'])
 
-            # batch aggregation
-            batch_num_prompts += 1
-            batch_num_passes  += pass_at_k
-            batch_rewards.extend(group_stats['rewards'])
-            batch_lengths.extend(group_stats['lengths'])
+                    # attach for debugging / analysis
+                    for s in group_samples:
+                        s["pass_at_k"] = pass_at_k
+                        s["k"] = k
+                        s["group_mean_reward"] = group_mean_reward
 
-            # attach for debugging / analysis
-            for s in group_samples:
-                s["pass_at_k"] = pass_at_k
-                s["k"] = k
-                s["group_mean_reward"] = group_mean_reward
+                    rollout_samples.extend(group_samples)
 
-            rollout_samples.extend(group_samples)
-
-        return rollout_samples
+                return rollout_samples
 
     def score_response(self, prompt: Dict[str, Any], response: Any) -> torch.Tensor:
         '''
