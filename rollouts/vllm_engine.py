@@ -430,31 +430,31 @@ class VLLMRolloutEngine:
                         # I didn't drop response_len == 0 here as it can be useful for logging, or even reward normalization as
                         # reward function should be designed in such way that it assigns negative rewards for example to empty responses.
                         group_samples.append({
-                            "iter": int(current_iter),
-                            "policy_version": int(policy_version),
-                            "loaded_version": int(self.loaded_version),
-                            
-                            # token-aligned
-                            "input_ids": input_ids, #[T]
-                            "rewards": rewards, #[T]
-                            "zscores": rewards.clone(), #[T] if len(group_samples) > 1 it will be replaced in normalize_rewards
-                            "token_masks": token_masks, #[T] 1 on response/valid tokens
-                            "token_dones": token_dones, #[T] 1 on last token if terminal
-                            "token_old_logprobs": token_old_logprobs, #[T] 0 on prompt since we don't backprop on it.
+                                                "iter": int(current_iter),
+                                                "policy_version": int(policy_version),
+                                                "loaded_version": int(self.loaded_version),
+                                                
+                                                # token-aligned
+                                                "input_ids": input_ids, #[T]
+                                                "rewards": rewards, #[T]
+                                                "zscores": rewards.clone(), #[T] if len(group_samples) > 1 it will be replaced in normalize_rewards
+                                                "token_masks": token_masks, #[T] 1 on response/valid tokens
+                                                "token_dones": token_dones, #[T] 1 on last token if terminal
+                                                "token_old_logprobs": token_old_logprobs, #[T] 0 on prompt since we don't backprop on it.
 
-                            # pred-aligned
-                            "pred_masks": pred_masks, #[T]
-                            "pred_dones": pred_dones, #[T]
-                            "pred_old_logprobs": pred_old_logprobs, #[T]
+                                                # pred-aligned
+                                                "pred_masks": pred_masks, #[T]
+                                                "pred_dones": pred_dones, #[T]
+                                                "pred_old_logprobs": pred_old_logprobs, #[T]
 
-                            "finish_reason": finish_reason,
-                            "stop_reason": stop_reason,
-                            "ended_on_eos": ended_on_eos,
+                                                "finish_reason": finish_reason,
+                                                "stop_reason": stop_reason,
+                                                "ended_on_eos": ended_on_eos,
 
-                            "response_ids": response_ids, # list[int]
-                            "prompt_ids": prompt_ids, # list[int]
-                            "response_text": getattr(response, "text", ""),
-                            "response_len": response_len,
+                                                "response_ids": response_ids, # list[int]
+                                                "prompt_ids": prompt_ids, # list[int]
+                                                "response_text": getattr(response, "text", ""),
+                                                "response_len": response_len,
                         })
 
                     # --------------------------------
