@@ -10,7 +10,6 @@ class Run(BaseModel):
     '''
     model_config = ConfigDict(extra='forbid')
     experiment_id: str
-    distributed_training_strategy: str = None
     seed: int
     project_name: str
     tracking_uri: str
