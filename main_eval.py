@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 # imports local methods, classes, etc.
 import configs.load as cfg # all config arguments
-from custom_datasets.prompt_only import PromptOnlyDataset # our custom pytorch dataset
+from data_feeds.prompts import PromptsFeed
 from rollouts.vllm_engine import VLLMRolloutEngine
 from misc.logging import setup_logging
 from rollouts.replay_buffer import ReplayBuffer
@@ -73,15 +73,12 @@ def create_rollout_dataloader(params, tokenizer, num_rollout_engines):
        would be used to train the policy.
     '''
     # 1. Initialize our custom datasets
-    reward_function_name = params.reward.reward_func
-    return_answer = True if reward_function_name in ['gsm8k_reward_func'] else False
-    prompt_ds = PromptOnlyDataset(prompt_key=params.data.prompt_key,
-                                  max_seq_len=params.data.max_seq_len,
-                                  tokenizer=tokenizer,
-                                  data_path=params.data.test_files_path,
-                                  return_text=False,
-                                  return_answer=return_answer,
-                                  )
+    prompt_ds = PromptsFeed(prompt_key=params.data.prompt_key,
+                            max_seq_len=params.data.max_seq_len,
+                            tokenizer=tokenizer,
+                            data_path=params.data.test_files_path,
+                            solution_key=params.data.solution_key,
+                            )
 
     # since we split the data across the rollout engines
     bsz = num_rollout_engines * params.rollout.rollout_batch_size_per_gpu
@@ -93,8 +90,6 @@ def create_rollout_dataloader(params, tokenizer, num_rollout_engines):
                             drop_last=False,
                             collate_fn=prompt_ds.collate_fn,
                             )
-
-
     return dataloader
 
 def create_rollout_engines(params, reward_fnc, eos_id):
@@ -159,6 +154,10 @@ def collect_rollouts(dataloader,
     total_samples_generated = 0
     total_reward_sum = 0.0
     total_response_len = 0
+    total_prompts = 0
+    total_pass_at_k = 0.0
+    total_prompt_mean_rewards = []
+    prompt_response_texts = []
 
     # Note dataLoader's batch_size is already num_rollout_engines * rollout_batch_size,
     batch_size   = dataloader.batch_size
@@ -193,10 +192,33 @@ def collect_rollouts(dataloader,
         rollout_merged = []
         for rl in rollout_lists:
             rollout_merged.extend(rl)
+            
+            # group samples by prompt
+            prompts_seen = set()
+            prompt_rewards_acc = []
+            
             for sample in rl:
                 total_samples_generated += 1
                 total_reward_sum += sample['rewards'].sum().item()
                 total_response_len += sample['response_len']
+
+                prompt_response_texts.append(sample['response_text'])
+
+                prompt_id = tuple(sample['prompt_ids'])  # unique key per prompt
+                if prompt_id not in prompts_seen:
+                    prompts_seen.add(prompt_id)
+                    
+                    # pass@k
+                    if "pass_at_k" in sample:
+                        total_prompts += 1
+                        total_pass_at_k += sample["pass_at_k"]
+
+                    # mean reward per prompt (group_mean_reward was added in generate)
+                    if "group_mean_reward" in sample:
+                        prompt_rewards_acc.append(sample["group_mean_reward"])
+            
+            total_prompt_mean_rewards.extend(prompt_rewards_acc)
+
 
         # 5. now add them to replay buffer
         replay_buffer.add_batch_seqs(rollout_merged)
@@ -204,16 +226,30 @@ def collect_rollouts(dataloader,
     rollout_time = time.time() - rollout_start_time
     avg_reward = total_reward_sum / max(1, total_samples_generated)
     avg_response_len = total_response_len / max(1, total_samples_generated)
+    
+    avg_pass_at_k = total_pass_at_k / max(1, total_prompts)
+
+    avg_reward_per_prompt = float(
+        sum(total_prompt_mean_rewards) / max(1, len(total_prompt_mean_rewards))
+    )
 
     logger.info(f"Average reward: {avg_reward}, Average response length: {avg_response_len}")
 
     if len(replay_buffer) <= 1:
         raise ValueError("Replay buffer is empty")
 
-    return {"total_samples_generated": total_samples_generated,
-            "avg_reward": avg_reward,
-            "avg_response_len": avg_response_len,
-            "rollout_time": rollout_time}
+    return {
+            "stats": {
+                "total_samples_generated": total_samples_generated,
+                "avg_reward": avg_reward,
+                "avg_reward_per_prompt": avg_reward_per_prompt,
+                "total_reward": total_reward_sum,
+                "avg_response_len": avg_response_len,
+                "rollout_time": rollout_time,
+                "avg_pass_at_k": avg_pass_at_k
+            },
+            "responses": prompt_response_texts,
+        }
 
 if __name__ == "__main__":
     # parse arguments
@@ -301,9 +337,9 @@ if __name__ == "__main__":
                                          replay_buffer=replay_buffer,
                                          logger=logger)
 
-    logger.info(f"Rollout complete: {rollout_stats['total_samples_generated']} samples, "
-                f"avg_reward={rollout_stats['avg_reward']:.4f}, avg_response_len={rollout_stats['avg_response_len']:.1f}, "
-                f"time={rollout_stats['rollout_time']:.2f}s")
+    logger.info(f"Rollout complete: {rollout_stats["stats"]['total_samples_generated']} samples, "
+                f"avg_reward={rollout_stats["stats"]['avg_reward']:.4f}, avg_response_len={rollout_stats["stats"]['avg_response_len']:.1f}, "
+                f"time={rollout_stats["stats"]['rollout_time']:.2f}s")
 
     logger.info("Evaluation completed successfully!")
 
@@ -312,8 +348,12 @@ if __name__ == "__main__":
     # save rollout stats
     rollout_stats_path = os.path.join(checkpoint_dir, "rollout_stats.json")
     with open(rollout_stats_path, "w") as f:
-        json.dump(rollout_stats, f)
-    logger.info(f"Rollout stats saved to {rollout_stats_path}")
+        json.dump(rollout_stats["stats"], f, indent=2)
+
+    # responses
+    responses_path = os.path.join(checkpoint_dir, "rollout_responses.json")
+    with open(responses_path, "w") as f:
+        json.dump(rollout_stats["responses"], f, indent=2)
 
     # save experiment config
     experiment_config_path = os.path.join(checkpoint_dir, "experiment_config.yaml")

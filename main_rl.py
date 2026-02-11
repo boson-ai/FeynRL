@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 import ray
 import time
 import mlflow
+from tqdm import tqdm
 
 # imports local methods, classes, etc.
 import configs.load as cfg # all config arguments
@@ -242,6 +243,9 @@ def collect_rollouts(dataloader,
     total_reward_sum = 0.0
     total_response_len = 0
     total_tokens = 0
+    total_prompts = 0
+    total_pass_at_k = 0.0
+    total_prompt_mean_rewards = []
 
     # here is an example:
     # local_batch_size is the batch size per gpu
@@ -276,14 +280,43 @@ def collect_rollouts(dataloader,
         rollout_merged = []
         for rl in rollout_lists:
             rollout_merged.extend(rl)
+            
+            # group samples by prompt
+            prompts_seen = set()
+            prompt_rewards_acc = []
+            
             for sample in rl:
                 total_samples_generated += 1
                 total_reward_sum += sample['rewards'].sum().item()
                 total_response_len += sample['response_len']
                 total_tokens += len(sample['prompt_ids']) + len(sample['response_ids'])
 
+                prompt_id = tuple(sample['prompt_ids'])  # unique key per prompt
+                if prompt_id not in prompts_seen:
+                    prompts_seen.add(prompt_id)
+                    
+                    # pass@k
+                    if "pass_at_k" in sample:
+                        total_prompts += 1
+                        total_pass_at_k += sample["pass_at_k"]
+
+                    # mean reward per prompt (group_mean_reward was added in generate)
+                    if "group_mean_reward" in sample:
+                        prompt_rewards_acc.append(sample["group_mean_reward"])
+            
+            total_prompt_mean_rewards.extend(prompt_rewards_acc)
+
         # 5. now add them to replay buffer
         replay_buffer.add_batch_seqs(rollout_merged)
+
+    rollout_time = time.time() - rollout_start_time
+    avg_reward = total_reward_sum / max(1, total_samples_generated)
+    avg_response_len = total_response_len / max(1, total_samples_generated)
+    avg_pass_at_k = total_pass_at_k / max(1, total_prompts)
+
+    avg_reward_per_prompt = float(
+        sum(total_prompt_mean_rewards) / max(1, len(total_prompt_mean_rewards))
+    )
 
     if len(replay_buffer) <= 1:
         raise ValueError("Replay buffer is empty")
@@ -301,10 +334,12 @@ def collect_rollouts(dataloader,
 
     return {"total_samples_generated": total_samples_generated,
             "avg_reward": avg_reward,
+            "avg_reward_per_prompt": avg_reward_per_prompt,
             "total_reward": total_reward_sum,
             "avg_response_len": avg_response_len,
             "rollout_time": rollout_time,
-            "tokens_per_sec": tps}
+            "tokens_per_sec": tps,
+            "avg_pass_at_k": avg_pass_at_k}
 
 def prepare_training_batches(replay_buffer, batch_size: int, num_engines: int) -> list:
     '''
@@ -691,9 +726,11 @@ if __name__ == "__main__":
                     "epoch/avg_kl_ref": epoch_avg_kl_ref,
                     "epoch/avg_clipfrac": epoch_avg_clipfrac,
                     "epoch/avg_reward": rollout_stats['avg_reward'],
+                    "epoch/avg_reward_per_prompt": rollout_stats['avg_reward_per_prompt'],
                     "epoch/total_reward": rollout_stats['total_reward'],
                     "epoch/avg_response_len": rollout_stats['avg_response_len'],
                     "epoch/total_samples": rollout_stats['total_samples_generated'],
+                    "epoch/avg_pass_at_k": rollout_stats["avg_pass_at_k"],
                     "epoch/rollout_time_sec": rollout_stats['rollout_time'],
                     "epoch/tokens_per_sec": rollout_stats['tokens_per_sec'],
                     "epoch/train_time_sec": train_time,
