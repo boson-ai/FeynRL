@@ -19,6 +19,12 @@ To make things easier, we provide scripts and selected results on a few datasets
 
 ## Quick Start
 
+### Experiment Logging + Tracking
+
+Both mlflow and wandb are supported. To use mlflow, set `logger_type: "mlflow"` in the config file. To use wandb, set `logger_type: "wandb"` in the config file.
+
+If you opt to use mlflow, you can set the tracking URI by setting `tracking_uri` in the config file. If you opt to use wandb, ensure that your wandb API key is set as an environment variable `WANDB_API_KEY`, or is stored in a `~/.wandb_key` file.
+
 ### Installation
 
 TODO
