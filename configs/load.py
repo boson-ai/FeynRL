@@ -13,7 +13,8 @@ class Run(BaseModel):
     distributed_training_strategy: str = None
     seed: int
     project_name: str
-    tracking_uri: str
+    tracking_uri: str | None = "http://localhost:880/"
+    logger_type: str | None = "mlflow" # Options: mlflow, wandb
     method: str = None
 
     # RL-specific fields
