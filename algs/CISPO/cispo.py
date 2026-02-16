@@ -79,7 +79,7 @@ class CISPO(COMMON):
         else:
             ref_model = None
 
-        return model, ref_model
+        return {"policy_model": model, "ref_model": ref_model}
 
     def compute_policy_loss(self,
                             logprobs: torch.Tensor,
@@ -146,10 +146,10 @@ class CISPO(COMMON):
             # save the metrics for debugging
             metrics = {
                 'clipfrac': clipfrac.item(),
-                'kl_old': approx_kl.item(),
-                'loss_ent': loss_ent.item(),
-                'loss_pi': loss_pi.item(),
-                'loss_total': loss_total.item(),
+                'approx_kl': approx_kl.item(),
+                'ent_loss': loss_ent.item(),
+                'pi_loss': loss_pi.item(),
+                'pi_loss_total': loss_total.item(),
                 'kl_ref': kl_ref.item(),
             }
 
@@ -237,9 +237,9 @@ class CISPO(COMMON):
             all_metrics.append(pi_metrics)
             if engine_id == 0:
                 progress_bar.set_postfix({
-                    "loss": f"{pi_loss.item():.4f}",
-                    "clip": f"{pi_metrics['clipfrac']:.3f}",
-                    "kl_old": f"{pi_metrics['kl_old']:.4f}",
+                    "pi_loss": f"{pi_loss.item():.4f}",
+                    "clipfrac": f"{pi_metrics['clipfrac']:.3f}",
+                    "approx_kl": f"{pi_metrics['approx_kl']:.4f}",
                     "kl_ref": f"{pi_metrics['kl_ref']:.4f}"
                 })
 

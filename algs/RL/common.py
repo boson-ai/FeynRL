@@ -47,23 +47,27 @@ class COMMON:
         models = self.load_model()
 
         # Unpack models flexibly
-        policy_model = models[0]
-        ref_model = models[1] if len(models) > 1 and models[1] is not None else None
-        value_model = models[2] if len(models) > 2 and models[2] is not None else None
+        policy_model = models["policy_model"]
+        ref_model    = models["ref_model"] if "ref_model" in models and models["ref_model"] is not None else None
+        value_model  = models["value_model"] if "value_model" in models and models["value_model"] is not None else None
 
         # Log model paths
         if value_model is not None:
-            # PPO case
-            print(f"[Alg:{self.alg_name}][Rank {rank}] Models loaded: {self.pi_model_path} {self.vf_model_path} {self.ref_model_path}")
+            # PPO has separate value model
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Models loaded: policy={self.model_path}, value={self.value_model_path}, ref={self.ref_model_path}")
 
         else:
-            # SGRPO/CISPO
+            # SGRPO/CISPO has policy only
             print(f"[Alg:{self.alg_name}][Rank {rank}] Model loaded: {self.model_path}")
 
         # Enable gradient checkpointing on the HF model before DS wrapping
         if self.gradient_checkpointing:
             policy_model.gradient_checkpointing_enable()
-            print(f"[Alg:{self.alg_name}][Rank {rank}] Gradient checkpointing enabled (policy)")
+            if value_model is not None:
+                value_model.gradient_checkpointing_enable()
+
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Gradient checkpointing enabled"
+                  f"{' (policy + value)' if value_model is not None else ''}")
 
         # Initialize policy engine
         self.policy_engine, self.policy_optimizer , _, _ = deepspeed.initialize(
