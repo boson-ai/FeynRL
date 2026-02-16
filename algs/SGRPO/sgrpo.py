@@ -192,6 +192,7 @@ class SGRPO(COMMON):
             # of the shard. Otherwise, we respect ga_pi.
             if self.update_only_after_full_replay:
                 is_boundary = is_last
+
             else:
                 is_boundary = (((step + 1) % ga_pi) == 0) or is_last
 
@@ -203,7 +204,6 @@ class SGRPO(COMMON):
             # this is a simple baseline for policy gradients (PPO in this code) as it reflects relative quality
             # among that prompt’s samples.
             advs      = micro_batch['zscore'][:, :-1].to(device, non_blocking=True)
-            #done      = micro_batch['done'][:, :-1].to(device, non_blocking=True)
             mask      = micro_batch['mask'][:, :-1].to(device, non_blocking=True)
             old_logprobs = micro_batch['old_logprobs'][:, :-1].to(device, non_blocking=True)
 
@@ -223,7 +223,6 @@ class SGRPO(COMMON):
             if self.kl_coeff > 0.0 and self.ref_model_engine is not None:
                 ref_logprobs = self.ref_forward(input_ids=input_ids,
                                                 att_mask=att_mask,
-                                                target_ids=target_ids,
                                                 pos_ids=pos_ids,
                                                 )
 

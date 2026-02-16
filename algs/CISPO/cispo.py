@@ -113,7 +113,7 @@ class CISPO(COMMON):
 
         # 2. calculate ratio = pi / pi_old = exp(logprobs - old_logprobs)
         logratio = (logprobs - old_logprobs).to(torch.float32)
-        ratio = torch.exp(logratio)
+        ratio    = torch.exp(logratio)
 
         # 3. CISPO loss: clipped_ratio.detach() * log(pi) * advantage
         # Unlike PPO, CISPO clips the importance ratio and uses it as a weighting
@@ -205,7 +205,6 @@ class CISPO(COMMON):
             # this is a simple baseline for policy gradients (PPO in this code) as it reflects relative quality
             # among that prompt’s samples.
             advs      = micro_batch['zscore'][:, :-1].to(device, non_blocking=True)
-            #done      = micro_batch['done'][:, :-1].to(device, non_blocking=True)
             mask      = micro_batch['mask'][:, :-1].to(device, non_blocking=True)
             old_logprobs = micro_batch['old_logprobs'][:, :-1].to(device, non_blocking=True)
 
@@ -225,7 +224,6 @@ class CISPO(COMMON):
             if self.kl_coeff > 0.0 and self.ref_model_engine is not None:
                 ref_logprobs = self.ref_forward(input_ids=input_ids,
                                                 att_mask=att_mask,
-                                                target_ids=target_ids,
                                                 pos_ids=pos_ids,
                                                 )
 

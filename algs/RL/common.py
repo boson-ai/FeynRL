@@ -57,13 +57,13 @@ class COMMON:
             print(f"[Alg:{self.alg_name}][Rank {rank}] Models loaded: {self.pi_model_path} {self.vf_model_path} {self.ref_model_path}")
 
         else:
-            # SGRPO/CISPO case
+            # SGRPO/CISPO
             print(f"[Alg:{self.alg_name}][Rank {rank}] Model loaded: {self.model_path}")
 
         # Enable gradient checkpointing on the HF model before DS wrapping
         if self.gradient_checkpointing:
             policy_model.gradient_checkpointing_enable()
-            print(f"[Alg:{self.alg_name}][Rank {rank}] Gradient checkpointing enabled")
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Gradient checkpointing enabled (policy)")
 
         # Initialize policy engine
         self.policy_engine, self.policy_optimizer , _, _ = deepspeed.initialize(
@@ -136,13 +136,12 @@ class COMMON:
 
         return logprobs, entropies, target_ids
 
-    def ref_forward(self, input_ids, att_mask, target_ids, pos_ids):
+    def ref_forward(self, input_ids, att_mask, pos_ids):
         '''
             input_ids and att_mask are [B, T]
             pos_ids is [B, T] or None
-            target_ids is [B, T-1]
             Returns:
-                logits is [B, T-1, vocab_size]
+                ref_logprobs is [B, T-1]
         '''
         # feed data to model
         with torch.no_grad():
@@ -158,6 +157,9 @@ class COMMON:
             # [B, T, V] -> [B, T-1, V]
             logits = output.logits[:, :-1, :].contiguous()
             B, T_minus_1, vocab_size = logits.shape
+
+            # [B, T] -> [B, T-1]
+            target_ids = input_ids[:, 1:].contiguous()
 
             # cross_entropy return -logprobs but we need logprobs
             # logits is [B, T-1, vocab_size] --> [B * (T-1), vocab_size]
