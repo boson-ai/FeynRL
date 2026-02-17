@@ -33,6 +33,7 @@ class PPO(COMMON):
                  value_model_path: str = None,
                  tau: float = None,
                  gamma: float = None,
+                 deepspeed_value_config: Any = None,
                  ):
         assert tau is not None and gamma is not None, 'tau and gamma must be provided for PPO'
         assert value_model_path is not None, 'value_model_path must be provided for PPO'
@@ -46,6 +47,7 @@ class PPO(COMMON):
         # training related parameters
         self.deepspeed_config = deepspeed_config
         self.deepspeed_ref_config = deepspeed_ref_config
+        self.deepspeed_value_config = deepspeed_value_config
         self.micro_batch_size_per_gpu = micro_batch_size_per_gpu
         self.gradient_checkpointing = gradient_checkpointing
 
@@ -117,13 +119,14 @@ class PPO(COMMON):
             return: rets, advs which would be both [B, T]
         '''
         # 1. Device and shape setup
+        # Perform GAE math in float32 for numerical stability under bf16/fp16.
         device = values.device
-        dtype  = values.dtype
         B, T   = values.shape
-        rets   = torch.zeros_like(values)
-        advs   = torch.zeros_like(values)
-        last_adv = torch.zeros(B, dtype=dtype, device=device)
-        rewards  = rewards.to(dtype=dtype, device=device)
+        values = values.to(torch.float32)
+        rets   = torch.zeros(B, T, dtype=torch.float32, device=device)
+        advs   = torch.zeros(B, T, dtype=torch.float32, device=device)
+        last_adv = torch.zeros(B, dtype=torch.float32, device=device)
+        rewards  = rewards.to(dtype=torch.float32, device=device)
 
         # 2. Delay casting the mask to the same dtype for indexing and checks.
         mask  = mask.to(device=device)
@@ -154,17 +157,17 @@ class PPO(COMMON):
 
         # 6. next value
         if last_val is not None:
-            next_val = last_val.to(dtype=dtype, device=device).detach().reshape(B)
+            next_val = last_val.to(dtype=torch.float32, device=device).detach().reshape(B)
 
         else:
             # biased estimation especially when there is need for bootstrapping, i.e.,
             # no EOS in generation like [x1,x2,x3]
-            next_val = torch.zeros(B, dtype=dtype, device=device)
+            next_val = torch.zeros(B, dtype=torch.float32, device=device)
 
         # 7. Using (tensor > 0.5) is safer than bool() if inputs are already floats
         # especially in case of BF16/FP16 training.
-        mask  = mask.to(dtype=dtype, device=device)
-        done  = done.to(dtype=dtype, device=device)
+        mask  = mask.to(dtype=torch.float32, device=device)
+        done  = done.to(dtype=torch.float32, device=device)
 
         # 8. Compute returns and advantages
         for t in reversed(range(T)): # [T-1, 0]
@@ -296,11 +299,11 @@ class PPO(COMMON):
             Compute value loss: 0.5 * (values - returns)^2
         '''
         device = values.device
-        dtype  = values.dtype
 
-        rets   = returns.detach()
-        v_loss = (values - rets).pow(2)
-        mask   = (mask.to(device=device) > 0.5).to(dtype=dtype)
+        # Compute value loss in float32 for numerical stability under bf16/fp16.
+        rets   = returns.detach().to(torch.float32)
+        v_loss = (values.to(torch.float32) - rets).pow(2)
+        mask   = (mask.to(device=device) > 0.5).to(dtype=torch.float32)
         denom  = mask.sum().clamp(min=1.0)
 
         loss = 0.5 * (v_loss * mask).sum() / denom
