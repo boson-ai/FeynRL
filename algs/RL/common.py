@@ -14,8 +14,8 @@ class COMMON:
             Helper to load a single model from HuggingFace.
         '''
         assert dtype != 'auto', "dtype must not be auto to avoid any precision issues"
-        assert self.attn_impl=='' or self.attn_impl in ['eager', 'flash_attention_2'], \
-            "attn_impl must be one of 'eager', 'flash_attention_2' or empty string"
+        assert self.attn_impl is None or self.attn_impl == '' or self.attn_impl in ['eager', 'flash_attention_2'], \
+            "attn_impl must be one of None, '', 'eager', 'flash_attention_2'"
 
         config = AutoConfig.from_pretrained(model_path)
         model  = AutoModelForCausalLM.from_pretrained(
@@ -88,12 +88,15 @@ class COMMON:
                                                     )
             print(f"[Alg:{self.alg_name}][Rank {rank}] Reference model initialized with DeepSpeed")
 
-        # Initialize value model if provided (PPO only)
+        # Initialize value model
         if value_model is not None:
+            # Use separate DS config for value model if available (different lr, weight decay, grad clip)
+            value_ds_config = self.deepspeed_value_config
+            value_ds_dict = value_ds_config.model_dump() if value_ds_config is not None else ds_config_dict
             self.value_engine, self.value_optimizer, _, _ = deepspeed.initialize(
                                                     model=value_model,
                                                     model_parameters=value_model.parameters(),
-                                                    config=ds_config_dict
+                                                    config=value_ds_dict
                                                     )
             print(f"[Alg:{self.alg_name}][Rank {rank}] Value model initialized with DeepSpeed")
 
@@ -224,13 +227,9 @@ class COMMON:
                 if hasattr(self.policy_engine.module, 'config'):
                     self.policy_engine.module.config.save_pretrained(output_dir)
                     print(f"[Alg:{self.alg_name}][Rank {rank}] Policy config saved")
+
                 else:
-                    # fallback by trying to get config from the model itself
-                    if hasattr(self.policy_engine.module, 'module'):
-                        # wrapped model e.g., deepspeed wrapper
-                        if hasattr(self.policy_engine.module.module, 'config'):
-                            self.policy_engine.module.module.config.save_pretrained(output_dir)
-                            print(f"[Alg:{self.alg_name}][Rank {rank}] Policy config saved (fallback)")
+                    print(f"[Alg:{self.alg_name}][Rank {rank}] WARNING: Could not find model config to save for policy")
 
             # Make sure rank 0 finished writing policy config
             if torch.distributed.is_initialized():
@@ -253,13 +252,9 @@ class COMMON:
                     if hasattr(self.value_engine.module, 'config'):
                         self.value_engine.module.config.save_pretrained(value_output_dir)
                         print(f"[Alg:{self.alg_name}][Rank {rank}] Value config saved")
+
                     else:
-                        # fallback by trying to get config from the model itself
-                        if hasattr(self.value_engine.module, 'module'):
-                            # wrapped model e.g., deepspeed wrapper
-                            if hasattr(self.value_engine.module.module, 'config'):
-                                self.value_engine.module.module.config.save_pretrained(value_output_dir)
-                                print(f"[Alg:{self.alg_name}][Rank {rank}] Value config saved (fallback)")
+                        print(f"[Alg:{self.alg_name}][Rank {rank}] WARNING: Could not find model config to save for value")
 
                 # Make sure rank 0 finished writing value config
                 if torch.distributed.is_initialized():

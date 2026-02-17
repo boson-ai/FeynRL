@@ -3,6 +3,7 @@ from typing import Dict, Any
 from pydantic import BaseModel, Field, ConfigDict, ValidationError
 import yaml
 import sys
+import copy
 
 class Run(BaseModel):
     '''
@@ -23,9 +24,12 @@ class Run(BaseModel):
     checkpoint_dir: str | None = None
 
     # Overlap training and rollout generation
-    overlap_enabled: bool | None = None # Enable overlap mode
-    overlap_max_lag: int | None = None # Max training steps ahead of rollout policy version
-    overlap_weight_update_interval: int | None = None # Update rollout weights every N training steps
+    # Enable overlap mode
+    overlap_enabled: bool | None = None
+    # Max training steps ahead of rollout policy version
+    overlap_max_lag: int | None = None
+    # Update rollout weights every N training steps
+    overlap_weight_update_interval: int | None = None
 
     # Weight sync: "direct" pushes weights via gpu memory (no disk I/O),
     # "disk" uses save-to-disk + vllm reload.
@@ -64,8 +68,16 @@ class Train(BaseModel):
     update_after_full_replay: bool | None = None
 
     # PPO-specific arguments
-    tau: float | None = None           # GAE lambda
-    gamma: float | None = None         # discount factor
+    # GAE lambda
+    tau: float | None = None
+    # discount factor
+    gamma: float | None = None
+    # defaults to train.lr if None
+    value_lr: float | None = None
+    # defaults to train.weight_decay if None
+    value_weight_decay: float | None = None
+    # defaults to train.clip_grad_norm if None
+    value_clip_grad_norm: float | None = None
     ###############
     # general training  loop arguments
     ###############
@@ -224,6 +236,8 @@ class Config(BaseModel):
     rollout: Rollout | None = None
     # Reference model DeepSpeed config
     deepspeed_ref: DeepSpeedRef | None = None
+    # Value model DeepSpeed config
+    deepspeed_value: DeepSpeed | None = None
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -305,6 +319,9 @@ class Config(BaseModel):
                     optimizer_steps_per_epoch = self.train.train_steps_per_epoch
 
                 else:
+                    # Note: estimated_replay_size may be slightly larger than actual if some
+                    # responses have response_len==0 (filtered in replay_buffer.add_batch_seqs).
+                    # This can cause the lr schedule to not fully reach cos_min_ratio.
                     estimated_replay_size = self.rollout.rollout_samples_per_epoch * self.rollout.n_samples
                     total_micro_batches = math.ceil(estimated_replay_size / self.train.train_batch_size_per_gpu)
                     micro_batches_per_engine = math.ceil(total_micro_batches / world_size)
@@ -420,6 +437,24 @@ class Config(BaseModel):
             self.deepspeed_ref.train_micro_batch_size_per_gpu = self.deepspeed.train_micro_batch_size_per_gpu
             self.deepspeed_ref.fp16 = dict(self.deepspeed.fp16)
             self.deepspeed_ref.bf16 = dict(self.deepspeed.bf16)
+
+        # 9 — Generate value model DS config.
+        # Clones the policy DS config and overrides optimizer params where specified.
+        if self.train.alg_name and self.train.alg_name.lower() == 'ppo':
+            value_ds = copy.deepcopy(self.deepspeed)
+
+            # Override optimizer lr if value_lr is set
+            v_lr = self.train.value_lr if self.train.value_lr is not None else self.train.lr
+            v_wd = self.train.value_weight_decay if self.train.value_weight_decay is not None else self.train.weight_decay
+            if value_ds.optimizer is not None:
+                value_ds.optimizer['params']['lr'] = v_lr
+                value_ds.optimizer['params']['weight_decay'] = v_wd
+
+            # Override gradient clipping if value_clip_grad_norm is set
+            v_clip = self.train.value_clip_grad_norm if self.train.value_clip_grad_norm is not None else self.train.clip_grad_norm
+            value_ds.gradient_clipping = float(v_clip)
+
+            self.deepspeed_value = value_ds
 
 def load_and_verify(method: str, input_yaml: str, experiment_id: str, rank: int, world_size: int | None = None):
     '''
