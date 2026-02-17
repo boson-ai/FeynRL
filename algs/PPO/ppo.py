@@ -58,7 +58,7 @@ class PPO(COMMON):
         self.ent_coeff = float(entropy_coeff)
 
         # value model params
-        self.vf_model_path = value_model_path
+        self.value_model_path = value_model_path
         self.tau = float(tau)
         self.gamma = float(gamma)
 
@@ -95,8 +95,8 @@ class PPO(COMMON):
 
         # Load value model
         # we assume the value model has the same dtype as the policy model
-        base_vf_model = self._load_single_model(self.vf_model_path, self.model_dtype)
-        value_model = ValueNetwork(base_vf_model)
+        base_value_model = self._load_single_model(self.value_model_path, self.model_dtype)
+        value_model = ValueNetwork(base_value_model)
 
         return {"policy_model": policy_model, "ref_model": ref_model, "value_model": value_model}
 
@@ -141,10 +141,13 @@ class PPO(COMMON):
         if (done & (~mask)).any():
             raise ValueError("done flag set on padding positions")
 
-        # 4. reject holes in padding e.g., [x1, x2, x3, pad, x4, x5] --> this is not supported
-        #    we only support [x1, x2, x3, pad, pad, pad...] or [x1, x2, x3, eos, pad,..]
-        if (mask[:, 1:] & (~mask[:, :-1])).any():
-            raise ValueError("mask has 0->1 transitions (padding in the middle). This is unsupported.")
+        # 4. reject holes in mask e.g., [1, 1, 0, 1, 1] --> non-contiguous valid regions.
+        # valid masks have one contiguous block of 1s (with optional leading/trailing 0s).
+        # A hole exists iff any 0 -> 1 rise occurs after a 1 -> 0 drop.
+        drops = (mask[:, :-1] & ~mask[:, 1:])  # 1 -> 0 transitions
+        rises = (~mask[:, :-1] & mask[:, 1:])  # 0 -> 1 transitions
+        if (rises & (drops.cumsum(dim=1) > 0)).any():
+            raise ValueError("mask has non-contiguous valid regions (holes). This is unsupported.")
 
         # prefill val and reward for invalid tokens (i.e., padding) as they can contain nan in padded slot
         rewards = rewards.masked_fill(~mask, 0.0)
