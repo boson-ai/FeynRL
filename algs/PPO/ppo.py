@@ -110,9 +110,7 @@ class PPO(COMMON):
         '''
             rewards, values: [B, T]
             done, mask: [B, T]
-            done:    1 if t is EOS (terminal), 0 otherwise.
-                     MUST be set at every packed sequence boundary so it
-                     shows the boundary of each sequence.
+            done:    1 if t is terminal (EOS/stop), 0 otherwise.
             mask:    1 if valid token, 0 if padding.
             GAE and returns: [B, T]
             last_val: [B]
@@ -158,13 +156,13 @@ class PPO(COMMON):
             empty = rewards.new_zeros((B, 0))
             return empty, empty
 
-        # 6. next value
+        # 6. next value for bootstrapping
         if last_val is not None:
             next_val = last_val.to(dtype=torch.float32, device=device).detach().reshape(B)
+            if not torch.isfinite(next_val).all():
+                raise ValueError("last_val contains NaN or Inf")
 
         else:
-            # biased estimation especially when there is need for bootstrapping, i.e.,
-            # no EOS in generation like [x1,x2,x3]
             next_val = torch.zeros(B, dtype=torch.float32, device=device)
 
         # 7. Using (tensor > 0.5) is safer than bool() if inputs are already floats
@@ -183,8 +181,9 @@ class PPO(COMMON):
             last_adv   = is_valid * (delta + (self.gamma * self.tau * last_adv * not_done))
             advs[:, t] = last_adv
 
-            # to avoid any leaking from padding.
-            next_val = values[:, t] * is_valid
+            # At valid positions use V(s_t); at padding keep next_val
+            # so the bootstrap survives through padding to the last valid token.
+            next_val = torch.where(is_valid > 0.5, values[:, t], next_val)
 
         rets = advs + values
 
@@ -215,11 +214,14 @@ class PPO(COMMON):
         # 1. make sure advantages are detached and
         # convert to float32 for stability under bf16/fp16
         adv = advantages.detach().to(torch.float32)
-        mask = (mask.to(device=device) > 0.5).to(dtype=dtype)
+        mask_bool = (mask.to(device=device) > 0.5)
+        mask = mask_bool.to(dtype=dtype)
         denom = mask.sum().clamp(min=1.0)
 
         # 2. calculate ratio = pi / pi_old = exp(logprobs - old_logprobs)
-        logratio = (logprobs - old_logprobs).to(torch.float32)
+        raw_logratio = (logprobs - old_logprobs).to(torch.float32)
+        # Ignore invalid (padded) positions before exp to avoid inf * 0 -> nan.
+        logratio = torch.where(mask_bool, raw_logratio, torch.zeros_like(raw_logratio))
         ratio   = torch.exp(logratio)
 
         # 3. compute loss: -(min(ratio * adv, clip_adv)) * mask
@@ -233,6 +235,8 @@ class PPO(COMMON):
 
         if ref_logprobs is not None and self.kl_coeff > 0.0:
             kl_dist = self.compute_kl_distance(logprobs=logprobs, ref_logprobs=ref_logprobs)
+            # avoid calculating kl for padded tokens.
+            kl_dist = torch.where(mask_bool, kl_dist, torch.zeros_like(kl_dist))
             kl_ref  = (kl_dist * mask).sum() / denom
 
         loss_total = loss_pi - self.ent_coeff * loss_ent + self.kl_coeff * kl_ref
@@ -270,7 +274,7 @@ class PPO(COMMON):
                 pos_ids: [B, T] or None
             Returns:
                 values: [B, T-1]
-                last_value: [B] value of the very last token
+                last_value: [B] value at each row's true last non-pad token
         '''
         if pos_ids is not None:
             pos_ids = pos_ids.to(input_ids.device)
@@ -286,9 +290,18 @@ class PPO(COMMON):
 
         # [B, T] -> [B, T-1]
         values = logits[:, :-1].contiguous()
-        # Value for terminal state (e.g., t=T-1) for bootstrapping if not EOS
-        # [B, T] -> [B]
-        last_value = logits[:, -1].contiguous()
+        # last_value is used for bootstrapping. For non-padded rows logits[:, -1] is correct.
+        # However, when there is padding, logits[:, -1] would be garbage. this is fixed by picking
+        # the last real token's value for each row.
+        B = logits.shape[0]
+        # attn_mask vs mask:
+        # attn_mask:  [1, 1, 1, 1, 1, 0, 0] -> prompt + response which all real tokens would be 1 and pad would be zero
+        # masks:      [0, 0, 1, 1, 0, 0, 0] -> only valid prediction positions
+        seq_lens = att_mask.sum(dim=1).long() # [B] number of real tokens
+        if (seq_lens <= 0).any():
+            raise ValueError("att_mask has rows with zero valid tokens; cannot compute bootstrap last_value")
+        last_real_idx = (seq_lens - 1).clamp(min=0) # [B]
+        last_value = logits[torch.arange(B, device=logits.device), last_real_idx]
 
         return values, last_value
 
@@ -331,7 +344,7 @@ class PPO(COMMON):
                 ids  = mb['input_ids'].to(device, non_blocking=True)
                 amsk = mb['attn_mask'].to(device, non_blocking=True)
                 pids = mb.get('position_ids', None)
-                vals, last_v = self.value_forward(input_ids=ids, attn_mask=amsk, position_ids=pids)
+                vals, last_v = self.value_forward(input_ids=ids, att_mask=amsk, pos_ids=pids)
                 # all are prediction aligned
                 rewards = mb['rewards'][:, :-1].to(device, non_blocking=True)
                 done    = mb['done'][:, :-1].to(device, non_blocking=True)
@@ -450,14 +463,10 @@ class PPO(COMMON):
             # 4. Compute value loss
             ########
             # Forward pass through the value function.
-            values, _ = self.value_forward(input_ids=input_ids,
-                                           att_mask=att_mask,
-                                           pos_ids=pos_ids)
+            values, _ = self.value_forward(input_ids=input_ids, att_mask=att_mask, pos_ids=pos_ids)
 
             # Compute value loss
-            v_loss, v_metrics = self.compute_value_loss(values=values,
-                                                        returns=returns,
-                                                        mask=mask)
+            v_loss, v_metrics = self.compute_value_loss(values=values, returns=returns, mask=mask)
 
             # store metrics
             all_metrics_value.append(v_metrics)
