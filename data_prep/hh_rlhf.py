@@ -64,8 +64,12 @@ def enforce_strict_alternation(turns):
     merged = []
     prev_role, prev_content = turns[0]
 
+    flag = 0
+
     for role, content in turns[1:]:
         if role == prev_role:
+
+            flag = 1
             # Merge consecutive same-role turns
             prev_content = prev_content.rstrip() + "\n\n" + content.lstrip()
         else:
@@ -178,14 +182,18 @@ def make_map_fn(split, args):
         chosen_cont = enforce_strict_alternation(chosen_cont) 
         rejected_cont = enforce_strict_alternation(rejected_cont) 
 
-        # Must have non-empty continuation
-        if len(chosen_cont) == 0 or len(rejected_cont) == 0:
+        # Convert continuation turns to text
+        chosen_text = render_continuation_text(chosen_cont)
+        rejected_text = render_continuation_text(rejected_cont)
+
+        # Must have non-empty prompt and continuations
+        if not prompt_turns or not chosen_text.strip() or not rejected_text.strip():
             return None
 
         data = {
             "prompt": build_prompt_messages(prompt_turns, args.system_prompt),
-            "answer": render_continuation_text(chosen_cont),
-            "rejected_answer": render_continuation_text(rejected_cont),
+            "answer": chosen_text,
+            "rejected_answer": rejected_text,
             "split": split,
             "index": idx,
         }
@@ -194,10 +202,9 @@ def make_map_fn(split, args):
 
     return process_fn
 
-
 def create_file_name(args, split):
     fpart = "wsp" if args.system_prompt else "ns"
-    return f"hh_rlhf_dpo_multiturn_{args.run_id}_{fpart}_{split}.parquet"
+    return f"hh_rlhf_dpo_{args.run_id}_{fpart}_{split}.parquet"
 
 
 # ============================================================
@@ -283,25 +290,29 @@ if __name__ == "__main__":
     # --------------------------------------------------------
     # Sanity Check Print
     # --------------------------------------------------------
-    sample = train_dataset[15]
+    for isample in range(5):
 
-    print(sample)
+        print(100 * "=")
+        print(100 * "=")
 
-    print("\n" + "=" * 80)
-    print("Sample Example")
-    print("=" * 80)
-    for m in sample["prompt"]:
-        print(f"{m['role']}: {m['content']}\n")
+        sample = train_dataset[isample]
+        print(sample)
 
-    print("=" * 80)
-    print("Chosen Continuation:\n")
-    print(sample["answer"])
-    print("=" * 80)
-    print("Rejected Continuation:\n")
-    print(sample["rejected_answer"])
-    print("=" * 80)
+        print("\n" + "=" * 80)
+        print("Sample Example")
+        print("=" * 80)
+        for m in sample["prompt"]:
+            print(f"{m['role']}: {m['content']}\n")
 
-    print(f"\nTrain: {len(train_dataset)}")
-    print(f"Val:   {len(val_dataset)}")
-    print(f"Test:  {len(test_dataset)}")
-    print("Done.")
+        print("=" * 80)
+        print("Chosen Continuation:\n")
+        print(sample["answer"])
+        print("=" * 80)
+        print("Rejected Continuation:\n")
+        print(sample["rejected_answer"])
+        print("=" * 80)
+
+        print(f"\nTrain: {len(train_dataset)}")
+        print(f"Val:   {len(val_dataset)}")
+        print(f"Test:  {len(test_dataset)}")
+        print("Done.")
