@@ -2,19 +2,14 @@ import argparse
 import os
 import datasets
 
-
-# ============================================================
-# HH Conversation Parsing
-# ============================================================
-
 def parse_hh_conversation(text):
-    """
-    Parse Anthropic HH conversation text into structured turns.
+    '''
+        Parse Anthropic HH conversation text into structured turns.
 
-    Returns:
-        List[Tuple[str, str]]  -> [(role, content), ...]
-        role ∈ {"user", "assistant"}
-    """
+        Returns:
+            List[Tuple[str, str]]  -> [(role, content), ...]
+            role are {"user", "assistant"}
+    '''
     turns = []
     current_role = None
     buffer = []
@@ -34,7 +29,7 @@ def parse_hh_conversation(text):
                 turns.append((current_role, "\n".join(buffer).strip()))
                 buffer = []
             current_role = "assistant"
-            buffer.append(line[len("Assistant:"):].strip())
+            buffer.append(line[len(" :"):].strip())
 
         else:
             buffer.append(line)
@@ -44,21 +39,15 @@ def parse_hh_conversation(text):
 
     return turns
 
-
-# ============================================================
-# First-Divergence Splitting
-# ============================================================
-
 def split_at_first_divergence(chosen_turns, rejected_turns):
-    """
-    Split two turn sequences at the first differing turn.
+    '''
+        Split two turn sequences at the first differing turn.
 
-    Returns:
-        prompt_turns
-        chosen_continuation_turns
-        rejected_continuation_turns
-    """
-
+        Returns:
+            prompt_turns
+            chosen_continuation_turns
+            rejected_continuation_turns
+    '''
     min_len = min(len(chosen_turns), len(rejected_turns))
 
     for i in range(min_len):
@@ -76,16 +65,10 @@ def split_at_first_divergence(chosen_turns, rejected_turns):
         rejected_turns[min_len:],
     )
 
-
-# ============================================================
-# Rendering Utilities
-# ============================================================
-
 def build_prompt_messages(prompt_turns, system_prompt=None):
-    """
-    Build structured chat messages for IT models.
-    """
-
+    '''
+        Build structured chat messages for IT models.
+    '''
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -96,18 +79,16 @@ def build_prompt_messages(prompt_turns, system_prompt=None):
 
     return messages
 
-
 def render_continuation_text(turns):
-    """
-    Convert continuation turns into raw assistant continuation text.
+    '''
+        Convert continuation turns into raw assistant continuation text.
 
-    We keep full trajectory after divergence.
-    Chat template during training will handle role formatting.
+        We keep full trajectory after divergence.
+        Chat template during training will handle role formatting.
 
-    Returns:
-        str
-    """
-
+        Returns:
+            str
+    '''
     text_parts = []
 
     for role, content in turns:
@@ -119,13 +100,10 @@ def render_continuation_text(turns):
 
     return "\n".join(text_parts).strip()
 
-
-# ============================================================
-# Dataset Mapping
-# ============================================================
-
 def make_map_fn(split, args):
-
+    '''
+        Map dataset examples to DPO format.
+    '''
     def process_fn(example, idx):
         chosen_raw = example["chosen"]
         rejected_raw = example["rejected"]
@@ -145,30 +123,22 @@ def make_map_fn(split, args):
         if len(chosen_cont) == 0 or len(rejected_cont) == 0:
             return None
 
-        data = {
-            "prompt": build_prompt_messages(prompt_turns, args.system_prompt),
-            "answer": render_continuation_text(chosen_cont),
-            "rejected_answer": render_continuation_text(rejected_cont),
-            "split": split,
-            "index": idx,
-        }
+        data = { "prompt": build_prompt_messages(prompt_turns, args.system_prompt),
+                 "answer": render_continuation_text(chosen_cont),
+                 "rejected_answer": render_continuation_text(rejected_cont),
+                 "split": split,
+                 "index": idx,
+                }
 
         return data
 
     return process_fn
 
-
 def create_file_name(args, split):
     fpart = "wsp" if args.system_prompt else "ns"
-    return f"hh_rlhf_dpo_multiturn_{args.run_id}_{fpart}_{split}.parquet"
-
-
-# ============================================================
-# Main
-# ============================================================
+    return f"hh_preference_multiturn_{args.run_id}_{fpart}_{split}.parquet"
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_source", default="Anthropic/hh-rlhf")
     parser.add_argument("--local_dir", required=True)
@@ -178,61 +148,41 @@ if __name__ == "__main__":
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--test_ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
-
     args = parser.parse_args()
 
-    # --------------------------------------------------------
+    ########
     # Load Dataset
-    # --------------------------------------------------------
+    ########
     dataset = datasets.load_dataset(args.data_source)
     full_train = dataset["train"]
+    test_split = full_train.train_test_split(test_size=args.test_ratio, seed=args.seed)
 
-    # --------------------------------------------------------
+    ########
     # Train / Val / Test Split
-    # --------------------------------------------------------
-    test_split = full_train.train_test_split(
-        test_size=args.test_ratio,
-        seed=args.seed,
-    )
-
+    ########
     remaining = test_split["train"]
     test_dataset = test_split["test"]
 
-    val_split = remaining.train_test_split(
-        test_size=args.val_ratio,
-        seed=args.seed,
-    )
+    val_split = remaining.train_test_split(test_size=args.val_ratio, seed=args.seed)
 
     train_dataset = val_split["train"]
     val_dataset = val_split["test"]
 
-    # --------------------------------------------------------
+    ########
     # Map to DPO Format
-    # --------------------------------------------------------
-    train_dataset = train_dataset.map(
-        make_map_fn("train", args),
-        with_indices=True,
-        num_proc=args.num_proc,
-        remove_columns=train_dataset.column_names,
-    ).filter(lambda x: x is not None)
+    ########
+    train_dataset = train_dataset.map(make_map_fn("train", args), with_indices=True, num_proc=args.num_proc,
+                                     remove_columns=train_dataset.column_names).filter(lambda x: x is not None)
 
-    val_dataset = val_dataset.map(
-        make_map_fn("val", args),
-        with_indices=True,
-        num_proc=args.num_proc,
-        remove_columns=val_dataset.column_names,
-    ).filter(lambda x: x is not None)
+    val_dataset = val_dataset.map(make_map_fn("val", args), with_indices=True, num_proc=args.num_proc,
+                                  remove_columns=val_dataset.column_names).filter(lambda x: x is not None)
 
-    test_dataset = test_dataset.map(
-        make_map_fn("test", args),
-        with_indices=True,
-        num_proc=args.num_proc,
-        remove_columns=test_dataset.column_names,
-    ).filter(lambda x: x is not None)
+    test_dataset = test_dataset.map(make_map_fn("test", args), with_indices=True, num_proc=args.num_proc,
+                                    remove_columns=test_dataset.column_names).filter(lambda x: x is not None)
 
-    # --------------------------------------------------------
-    # Save
-    # --------------------------------------------------------
+    ########
+    # save dataset
+    ########
     os.makedirs(args.local_dir, exist_ok=True)
 
     train_file = os.path.join(args.local_dir, create_file_name(args, "train"))
@@ -243,11 +193,7 @@ if __name__ == "__main__":
     val_dataset.to_parquet(val_file)
     test_dataset.to_parquet(test_file)
 
-    # --------------------------------------------------------
-    # Sanity Check Print
-    # --------------------------------------------------------
     sample = train_dataset[0]
-
     print(sample)
 
     print("\n" + "=" * 80)
