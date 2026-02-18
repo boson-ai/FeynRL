@@ -17,52 +17,6 @@ LeanRL is built around three core principles:
 
 To make things easier, we provide scripts and selected results on a few datasets across multiple algorithms. The `experiment` folder contains runnable scripts, and this page summarizes results from some of them.
 
-## Installation
-
-### Prerequisites
-
-- NVIDIA GPU
-- NVIDIA driver compatible with CUDA 12.x
-- Conda (Miniconda or Anaconda)
-
-Verify CUDA:
-
-```bash
-nvidia-smi
-```
-
-### Environment Setup
-
-```bash
-conda create -n leanrl-env python=3.13.1 -y
-conda activate leanrl-env 
-```
-
-#### CUDA toolkit
-
-```bash
-conda install -c nvidia cuda-toolkit=12.2
-```
-
-#### PyTorch (CUDA 12.6)
-
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-```
-
-#### Core packages
-
-```bash
-pip install pydantic==2.12.5 pyyaml==6.0.3 huggingface_hub==0.36.0 transformers==4.57.6 deepspeed==0.18.6 datasets==4.5.0 vllm==0.15.1 mlflow==3.8.1
-```
-
-#### FlashAttention
-
-```bash
-pip install flash-attn --no-build-isolation --config-settings="--jobs=8" --verbose
-```
-
-
 ## Contributing
 
 Contributions are welcome. Please keep changes easy to understand, test, and debug, and follow the existing style.
