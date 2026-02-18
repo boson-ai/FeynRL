@@ -134,6 +134,9 @@ class ReplayBuffer(Dataset):
         for x in batch:
             # pad everything to zero except for input_ids which should
             # be padded to pad_token_id
+            # attn_mask vs mask:
+            # attn_mask:  [1, 1, 1, 1, 1, 0, 0]   -> prompt + response which all real tokens would be 1 and pad would be zero
+            # masks:      [0, 0, 1, 1, 0, 0, 0]   -> only valid prediction positions
             input_ids.append(pad_1d_to_length(x=x["input_ids"], pad_value=self.pad_token_id, target_len=target_len))
             attn_masks.append(pad_1d_to_length(x=x["attn_masks"], pad_value=0, target_len=target_len))
             old_logps.append(pad_1d_to_length(x=x["old_logps"], pad_value=0.0, target_len=target_len))
