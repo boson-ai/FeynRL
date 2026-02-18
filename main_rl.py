@@ -276,7 +276,6 @@ def collect_rollouts(dataloader,
         rollout_merged = []
         for rl in rollout_lists:
             rollout_merged.extend(rl)
-            
             for sample in rl:
                 total_samples_generated += 1
                 total_reward_sum += sample['rewards'].sum().item()
