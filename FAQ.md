@@ -2,7 +2,7 @@
 
 ## Why should I use this framework?
 
-This is an RL first repo that focuses heavily on the algorithmic side of RL for large models, not just infrastructure. We also discuss and implement practical methods and training tricks that are commonly used in training frontier models but are rarely written down publicly.
+This is an **RL-first** repo that focuses heavily on the algorithmic and research side of RL for large models, not just infrastructure. We also discuss and implement practical methods and training tricks that are commonly used in training frontier models but are rarely written down publicly.
 
 More importantly, LeanRL is designed to remove a common trade off. Many industry-grade frameworks can train at scale, but they are hard to modify and not ideal for doing research. Many research frameworks are easy to change, but they typically only support toy settings, and it's unclear how well those results translate to realistic scenarios.
 
