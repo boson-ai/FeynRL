@@ -1,8 +1,16 @@
 # FAQ
 
+## Why should I use this framework?
+
+This is an RL first repo that focuses heavily on the algorithmic side of RL for large models, not just infrastructure. We also discuss and implement practical methods and training tricks that are commonly used in training frontier models but are rarely written down publicly.
+
+More importantly, LeanRL is designed to remove a common trade off. Many industry-grade frameworks can train at scale, but they are hard to modify and not ideal for doing research. Many research frameworks are easy to change, but they typically only support toy settings, and it's unclear how well those results translate to realistic scenarios.
+
+Our goal is to build something that lets you do both. You should be able to run realistic experiments on large data with multi node, multi GPU training, while still understanding what is happening, debugging quickly, and making changes with confidence. If you care about moving fast, understanding how the underlying system and algorithms work, and extending methods without losing the ability to train at scale in a production grade setting, LeanRL is built for you.
+
 ## Why not run rollout engines fully in parallel (continuous generation) while training runs?
 
-You're right that overlapping rollout and training can leave some GPU capacity on the table in certain configurations. The reason this framework doesn't default to "always-on" rollout is mainly about data off-policyness and algorithmic bottlenecks, not just throughput.
+That is a good point that not overlapping rollout and training can leave some GPU capacity on the table. The reason this framework doesn't default to "always-on" rollout is mainly about data off-policyness and algorithmic bottlenecks, not just throughput.
 
 1. **On-policy methods don't benefit much from stale, continuously generated data.** Most practical RL post-training recipes for large models are effectively on-policy (or close to it) and rely on mechanisms like PPO-style clipping (or related constraints) to stay stable when the policy changes. If a rollout engine keeps generating while the policy is being updated, a growing fraction of those samples quickly become off-policy. Once the divergence is large, clipping/constraints tend to squash the update signal and many samples contribute little to no useful gradient. In other words, "more generations" is not automatically "more learning" if those generations are produced by a policy that is already out of date relative to the current optimizer state.
 
