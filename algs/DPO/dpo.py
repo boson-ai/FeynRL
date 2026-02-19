@@ -128,14 +128,13 @@ class DPO:
     def eval_step(self, micro_batch):
         '''
            This implements a single validation step per rank/gpu.
+           Setting model to eval mode and torch.no_grad() context are done in main.
         '''
-        self.model_engine.eval()
-        with torch.no_grad():
-            logits, ref_logits, target_ids, loss_mask = self.forward(micro_batch)
-            loss, metrics = self.compute_loss(logits=logits,
-                                              ref_logits=ref_logits,
-                                              target_ids=target_ids,
-                                              loss_mask=loss_mask)
+        logits, ref_logits, target_ids, loss_mask = self.forward(micro_batch)
+        loss, metrics = self.compute_loss(logits=logits,
+                                          ref_logits=ref_logits,
+                                          target_ids=target_ids,
+                                          loss_mask=loss_mask)
 
         return metrics
 
