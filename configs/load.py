@@ -140,6 +140,16 @@ class Model(BaseModel):
     attn_implementation: str = None
     gradient_checkpointing: bool = None
 
+class Peft(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    use_peft: bool
+    peft_type: str | None = None
+    task_type: str | None = None
+    lora_rank: int | None = None
+    lora_alpha: int | None = None
+    lora_dropout: float | None = None
+    lora_target_modules: list[str] | None = None
+
 class DeepSpeed(BaseModel):
     '''
         Everything related to DeepSpeed goes here.
@@ -241,6 +251,9 @@ class Config(BaseModel):
     deepspeed_ref: DeepSpeedRef | None = None
     # Value model DeepSpeed config
     deepspeed_value: DeepSpeed | None = None
+
+    # peft specific config
+    peft: Peft | None = None
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

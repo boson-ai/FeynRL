@@ -11,6 +11,7 @@ from tqdm import tqdm
 import gc
 import mlflow
 import time
+from peft import get_peft_model, LoraConfig
 
 # imports local methods, classes, etc.
 import configs.load as cfg# all config arguments
@@ -65,6 +66,24 @@ def init_rank_world_size():
 
     return rank, world_size, local_rank
 
+def apply_peft_module(model, peft_config):
+    '''
+        Apply PEFT module to the model if it is enabled.
+    '''
+    if peft_config.peft_type == 'lora':
+        lora_config = LoraConfig(r=peft_config.lora_rank,
+                                 lora_alpha=peft_config.lora_alpha,
+                                 lora_dropout=peft_config.lora_dropout,
+                                 target_modules=peft_config.lora_target_modules,
+                                 task_type=peft_config.task_type)
+
+        model_peft = get_peft_model(model, lora_config)
+        print("LoRA model loaded successfully")
+        return model_peft
+
+    else:
+        raise ValueError(f"Unsupported PEFT type: {peft_config.peft_type}")
+
 def load_models_and_tokenizer(model_name, model_dtype, trust_remote_code, attn_impl, rank):
     '''
         Load models and tokenizer.
@@ -117,9 +136,11 @@ def create_training_engine(deepspeed_config, model):
         deepspeed.init_distributed()
 
     # 2. Initialize model engine
+    # only pass trainable params so ds doesn't waste memory on frozen ones
+    trainable_params = [p for p in model.parameters() if p.requires_grad ]
     model_engine, optimizer, _, _ = deepspeed.initialize(
                                                         model=model,
-                                                        model_parameters=model.parameters(),
+                                                        model_parameters=trainable_params,
                                                         config=ds_config_dict
                                                         )
     return model_engine, optimizer
@@ -216,6 +237,12 @@ if __name__ == "__main__":
                                                  trust_remote_code=config.model.trust_remote_code,
                                                  attn_impl=config.model.attn_implementation,
                                                  rank=rank)
+    # apply PEFT module if enabled
+    if config.peft.use_peft:
+        model = apply_peft_module(model=model, peft_config=config.peft)
+
+        if rank == 0:
+            model.print_trainable_parameters()
 
     ########
     # 5. Setup trainiing and inference engines
@@ -223,6 +250,15 @@ if __name__ == "__main__":
     if config.model.gradient_checkpointing:
         logger.info("Gradient checkpointing enabled")
         model.gradient_checkpointing_enable()
+
+        # With gradient checkpointing + peft/lora, pytorch may require that at least
+        # one input to each checkpointed block has requires_grad=True. When the base model
+        # is frozen which is the case in lora (i.e.,requires_grad=False), it causes backward to
+        # fail or skip grads. Hence, we need to force the inputs to require grad so lora params
+        # inside checkpointed blocks still receive gradients.
+        if config.peft.use_peft:
+            if config.peft.peft_type == "lora":
+                model.enable_input_require_grads()
 
     model_engine, optimizer = create_training_engine(deepspeed_config=config.deepspeed, model=model)
 
@@ -388,7 +424,13 @@ if __name__ == "__main__":
         logger.info(f"[Epoch {epoch+1}] Saving checkpoint to {model_path}")
 
         # Save as HuggingFace format
-        model_engine.save_16bit_model(model_path)
+        if config.peft.use_peft:
+            if rank == 0:
+               # save only the lora adapter weights
+               model_engine.module.save_pretrained(model_path)
+
+        else:
+            model_engine.save_16bit_model(model_path)
 
         # Barrier to ensure all ranks finished writing before rank 0 saves config
         if torch.distributed.is_initialized():
