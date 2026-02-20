@@ -253,7 +253,7 @@ class Config(BaseModel):
     deepspeed_value: DeepSpeed | None = None
 
     # peft specific config
-    peft: Peft | None = None
+    peft: Peft = Field(default_factory=lambda: Peft(use_peft=False))
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
