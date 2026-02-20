@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset, DataLoader, DistributedSampler
+from torch.utils.data import Dataset, DataLoader
 import os
 from datasets import load_dataset
 

@@ -1,2 +1,0 @@
-pip3 install pydantic
-pip3 install pyyaml
