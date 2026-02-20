@@ -86,7 +86,7 @@ python -c "import vllm; import deepspeed; import transformers; print('All core i
 ## Step 5: Install FlashAttention (Last — Always)
 
 ```bash
-pip install flash-attn --no-build-isolation --config-settings="--jobs=8" --verbose
+pip install flash-attn==2.8.3 --no-build-isolation --config-settings="--jobs=8" --verbose
 ```
 
 **Verify FlashAttention:**
