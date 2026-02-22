@@ -1,5 +1,6 @@
 import os
 import random
+import atexit
 import numpy as np
 import argparse
 import importlib
@@ -106,11 +107,11 @@ def create_training_engines(params, alg, world_size, master_addr, master_port):
                     "PYTHONPATH": os.getcwd(), # Ensure current directory is in path for all workers
                     }
 
-        # NCCL env vars for multi-node clusters with multiple NICs
-        # if params.run.nccl_socket_ifname:
-        #     ray_vars["NCCL_SOCKET_IFNAME"] = params.run.nccl_socket_ifname
-        # if params.run.nccl_ib_hca:
-        #     ray_vars["NCCL_IB_HCA"] = params.run.nccl_ib_hca
+        # NCCL env vars for multi-node clusters
+        if params.run.nccl_socket_ifname:
+            ray_vars["NCCL_SOCKET_IFNAME"] = params.run.nccl_socket_ifname
+        if params.run.nccl_ib_hca:
+            ray_vars["NCCL_IB_HCA"] = params.run.nccl_ib_hca
 
         runner = alg.options(num_gpus=1, runtime_env={"env_vars": ray_vars}
                             ).remote(**kwargs)
@@ -527,6 +528,18 @@ if __name__ == "__main__":
     logger.info(f"Initializing Ray ...")
     master_addr = setup_ray(ray_address=config.run.ray_address)
     logger.info(f"Ray initialized. Master address: {master_addr}")
+    # registers ray.shutdown as a function to be called
+    # automatically when the python process exits. Without it, orphaned ray
+    # processes can linger and hold onto gpu memory after the script dies.
+    atexit.register(ray.shutdown)
+
+    cluster_gpus = ray.cluster_resources().get("GPU", 0)
+    needed_gpus = training_gpus + rollout_gpus
+    if needed_gpus > cluster_gpus:
+        raise ValueError(
+            f"Need {needed_gpus} GPUs (training={training_gpus} + rollout={rollout_gpus}) "
+            f"but Ray cluster only has {int(cluster_gpus)} GPUs"
+        )
 
     ########
     # 3. initialize training engine
@@ -728,9 +741,11 @@ if __name__ == "__main__":
         ################
         # 5. Refresh rollout policy via direct weight sync
         ################
+        sync_attempted = False
         sync_success = False
         is_last_epoch = (epoch == number_of_epochs - 1)
         if weight_sync_method == "direct" and not is_last_epoch:
+            sync_attempted = True
             logger.info(f"[Epoch {epoch+1}] Syncing weights directly to rollout engines (version {policy_version})...")
             sync_success = sync_weights_direct(training_engines=training_engine,
                                                rollout_engines=rollout_engines,
@@ -747,7 +762,12 @@ if __name__ == "__main__":
         should_save_disk = (checkpoint_save_interval > 0 and
                            ((epoch + 1) % checkpoint_save_interval == 0 or is_last_epoch))
 
-        if weight_sync_method == "disk" or sync_success == False or should_save_disk == True:
+        # save to disk when:
+        # 1. using disk-based sync is true.
+        # 2. direct sync was attempted but failed.
+        # 3. periodic/final checkpoint save.
+        need_disk_for_rollout = (weight_sync_method == "disk") or (sync_attempted and not sync_success)
+        if need_disk_for_rollout or should_save_disk or is_last_epoch:
             model_path = save_checkpoint(epoch=epoch,
                                          version=policy_version,
                                          tokenizer=tokenizer,
@@ -760,7 +780,7 @@ if __name__ == "__main__":
         ################
         # 6. Refresh rollout policy via disk-based fallback
         ################
-        if sync_success == False and not is_last_epoch:
+        if need_disk_for_rollout and not is_last_epoch:
             logger.info(f"[Epoch {epoch+1}] Refreshing rollout engines with new policy (version {policy_version})...")
             refresh_rollout_engine(rollout_engines=rollout_engines,
                                    updated_policy_path=model_path,
