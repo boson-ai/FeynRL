@@ -1,11 +1,11 @@
 ## How to use
 
-After setting up the environment, the next step is preparing the data. See the scripts in [`data-pre/`](data-pre) for reference implementations—you can adapt them to your own datasets.
+After setting up the environment, the next step is preparing the data. See the scripts in [`data-prep/`](data-prep) for reference implementations—you can adapt them to your own datasets.
 
 **Data format requirement:** your final processed data must match the **exact** format produced by these scripts (the original/raw format does not matter). You need to write your own scripts simailr to the following scripts to prepare your data in the required format.
 
-* [`data-pre/gsm8k.py`](data-pre/gsm8k.py) prepares **GSM8K** in a format suitable for **SFT** and **RL** training, and can also be used for evaluation.
-* [`data-pre/hh_rlhf.py`](data-pre/hh_rlhf.py) prepares a **preference/contrastive** dataset suitable for **DPO**-style contrastive learning.
+* [`data-prep/gsm8k.py`](data-prep/gsm8k.py) prepares **GSM8K** in a format suitable for **SFT** and **RL** training, and can also be used for evaluation.
+* [`data-prep/hh_rlhf.py`](data-prep/hh_rlhf.py) prepares a **preference/contrastive** dataset suitable for **DPO**-style contrastive learning.
 
 Once your data is prepared, update the **`data`** section in the relevant config file and run the corresponding entrypoint:
 
@@ -52,7 +52,7 @@ CUDA_VISIBLE_DEVICES=0,1,2 torchrun --nproc_per_node=3 main_cl.py --config-file 
 
 **Notes**
 
-* Ensure `cl_args.yaml` points to the processed dataset paths and that the expected fields (chosen/rejected, etc.) match what the trainer expects.
+* Ensure `cl_args.yaml` points to the processed dataset paths and that the expected fields match what the trainer expects.
 
 ---
 
@@ -70,8 +70,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4 python main_rl.py --config-file ./configs/rl_args
 
 * RL uses two types of engines:
 
-  * **Training engine** (DeepSpeed, optimizer updates)
-  * **Rollout engine(s)** (inference/generation for trajectories)
+  * **Training engine** (based on DeepSpeed)
+  * **Rollout engine(s)** (inference/generation for trajectories which is based on vLLM)
 * Ray schedules these workers across available GPUs.
 
 **Config knobs**
@@ -145,4 +145,3 @@ python main_rl.py --config-file ./configs/rl_args.yaml --experiment_id exp4
 **Important**
 
 * Do **not** set `CUDA_VISIBLE_DEVICES` for the multi-node RL run. Ray discovers and manages GPUs across nodes; forcing visibility can cause mismatches and scheduling errors.
-  
