@@ -21,8 +21,8 @@ You should see a table showing your GPU model, driver version, and a CUDA versio
 ## Step 1: Create and Activate the Conda Environment
 
 ```bash
-conda create -n leanrl-env python=3.13.1 -y
-conda activate leanrl-env
+conda create -n feynrl-env python=3.13.1 -y
+conda activate feynrl-env
 ```
 
 ---
