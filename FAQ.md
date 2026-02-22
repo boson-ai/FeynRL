@@ -1,4 +1,7 @@
 # FAQ
+## Why this repo called FeynRL?
+
+The name nods to Richard Feynman’s emphasis on clear, computational thinking, which is exactly what this repository aims for in building RL methods. It also loosely echoes his "sum over histories" view in quantum mechanics, where certain predictions are computed by summing contributions from many possible paths; likewise, RL improves by learning from many sampled trajectories (rollouts), not a single one.
 
 ## Why should I use this framework?
 
