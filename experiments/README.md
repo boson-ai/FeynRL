@@ -1,11 +1,11 @@
 ## How to use
 
-After setting up the environment, the next step is preparing the data. See the scripts in [`data-prep/`](data-prep) for reference implementations—you can adapt them to your own datasets.
+After setting up the environment, the next step is preparing the data. See the scripts in [`data-prep/`](https://github.com/rasoolfa/FeynRL/tree/main/data_prep) for reference implementations—you can adapt them to your own datasets.
 
 **Data format requirement:** your final processed data must match the **exact** format produced by these scripts (the original/raw format does not matter). You need to write your own scripts simailr to the following scripts to prepare your data in the required format.
 
-* [`data-prep/gsm8k.py`](data-prep/gsm8k.py) prepares **GSM8K** in a format suitable for **SFT** and **RL** training, and can also be used for evaluation.
-* [`data-prep/hh_rlhf.py`](data-prep/hh_rlhf.py) prepares a **preference/contrastive** dataset suitable for **DPO**-style contrastive learning.
+* [`data-prep/gsm8k.py`](https://github.com/rasoolfa/FeynRL/blob/main/data_prep/gsm8k.py) prepares **GSM8K** in a format suitable for **SFT** and **RL** training, and can also be used for evaluation.
+* [`data-prep/hh_rlhf.py`](https://github.com/rasoolfa/FeynRL/blob/main/data_prep/hh_rlhf.py) prepares a **preference/contrastive** dataset suitable for **DPO**-style contrastive learning.
 
 Once your data is prepared, update the **`data`** section in the relevant config file and run the corresponding entrypoint:
 
