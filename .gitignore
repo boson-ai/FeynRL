@@ -119,6 +119,5 @@ logs/
 # checkpoints
 checkpoints/
 
-# wandb
+# Weights and Biases
 wandb/
-.wandb_key

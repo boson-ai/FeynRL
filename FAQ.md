@@ -1,12 +1,15 @@
 # FAQ
+## Why this repo called FeynRL?
+
+FeynRL (pronounced like “FineRL”) nods to Richard Feynman’s emphasis on clear, computational thinking, which is exactly what this repository aims for in building RL methods. It also loosely echoes his "sum over histories" view in quantum mechanics, where certain predictions are computed by summing contributions from many possible paths; likewise, RL improves by learning from many sampled trajectories (rollouts), not a single one.
 
 ## Why should I use this framework?
 
 This is an **RL-first** repo that focuses heavily on the algorithmic and research side of RL for large models, not just infrastructure. We also discuss and implement practical methods and training tricks that are commonly used in training frontier models but are rarely written down publicly.
 
-More importantly, LeanRL is designed to remove a common trade off. Many industry-grade frameworks can train at scale, but they are hard to modify and not ideal for doing research. Many research frameworks are easy to change, but they typically only support toy settings, and it's unclear how well those results translate to realistic scenarios.
+More importantly, FeynRL is designed to remove a common trade off. Many industry-grade frameworks can train at scale, but they are hard to modify and not ideal for doing research. Many research frameworks are easy to change, but they typically only support toy settings, and it's unclear how well those results translate to realistic scenarios.
 
-Our goal is to build something that lets you do both. You should be able to run realistic experiments on large data with multi node, multi GPU training, while still understanding what is happening, debugging quickly, and making changes with confidence. If you care about moving fast, understanding how the underlying system and algorithms work, and extending methods without losing the ability to train at scale in a production grade setting, LeanRL is built for you.
+Our goal is to build something that lets you do both. You should be able to run realistic experiments on large data with multi node, multi GPU training, while still understanding what is happening, debugging quickly, and making changes with confidence. If you care about moving fast, understanding how the underlying system and algorithms work, and extending methods without losing the ability to train at scale in a production grade setting, FeynRL is built for you.
 
 ## Why not run rollout engines fully in parallel (continuous generation) while training runs?
 
@@ -26,7 +29,7 @@ That said, some of these improvements have only a marginal impact on performance
 
 ## There are differences between your implementation of methods like GRPO. Why is that the case?
 
-That is correct. RL training is sensitive to small implementation details, and some important details are often overlooked when applying RL to large models, unlike classic RL settings such as games. As a result, in some places LeanRL makes deliberate choices to improve stability and performance, even if that means it does not match a specific reference implementation line for line.
+That is correct. RL training is sensitive to small implementation details, and some important details are often overlooked when applying RL to large models, unlike classic RL settings such as games. As a result, in some places FeynRL makes deliberate choices to improve stability and performance, even if that means it does not match a specific reference implementation line for line.
 
 When the differences are intentional, we document them and name variants explicitly. For example, you may see SGRPO, which indicates a GRPO style method with stability focused implementation choices and some clear changes from the original work.
 
