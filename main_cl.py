@@ -269,9 +269,8 @@ if __name__ == "__main__":
         # is frozen which is the case in lora (i.e.,requires_grad=False), it causes backward to
         # fail or skip grads. Hence, we need to force the inputs to require grad so lora params
         # inside checkpointed blocks still receive gradients.
-        if config.peft.use_peft:
-            if config.peft.peft_type == "lora":
-                model.enable_input_require_grads()
+        if config.peft.use_peft and config.peft.peft_type == "lora":
+            model.enable_input_require_grads()
 
     model_engine, ref_model_engine, optimizer = create_training_engine(deepspeed_config=config.deepspeed,
                                                                        deepspeed_ref_config=config.deepspeed_ref,
@@ -453,10 +452,12 @@ if __name__ == "__main__":
 
         # Save as HuggingFace format
         if config.peft.use_peft:
-            if rank == 0:
-               # save only the lora adapter weights
-               model_engine.module.save_pretrained(model_path)
-
+            # All ranks must participate in GatheredParameters for ZeRO-3,
+            # but only rank 0 writes the adapter weights to disk.
+            peft_params = [p for p in model_engine.module.parameters() if p.requires_grad]
+            with deepspeed.zero.GatheredParameters(peft_params, modifier_rank=0):
+                if rank == 0:
+                    model_engine.module.save_pretrained(model_path)
         else:
             model_engine.save_16bit_model(model_path)
 

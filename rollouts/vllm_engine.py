@@ -210,7 +210,7 @@ class VLLMRolloutEngine:
                 )
 
         return SamplingParams(
-            seed=self.seed,
+            seed=self.seed + self.engine_id,
             n=self.n_samples,
 
             temperature=self.temperature,

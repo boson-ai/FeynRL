@@ -3,13 +3,15 @@ import torch
 import torch.distributed
 from transformers import AutoModelForCausalLM, AutoConfig
 import deepspeed
+from peft import get_peft_model, LoraConfig
+from safetensors.torch import save_file
 
 class COMMON:
     '''
         This class provides common functions for policy gradient algorithms.
         Only contains methods that are 100% identical across all PG algorithms.
     '''
-    def _load_single_model(self, model_path: str, dtype: torch.dtype):
+    def _load_single_model(self, model_path: str, dtype: torch.dtype, model_name: str):
         '''
             Helper to load a single model from HuggingFace.
         '''
@@ -25,7 +27,50 @@ class COMMON:
                                 config=config,
                                 attn_implementation=None if self.attn_impl == '' else self.attn_impl
                             )
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+
+        # apply PEFT module if enabled
+        if model_name != "ref" and self.peft_config.use_peft:
+            model = self._apply_peft_module(model)
+            if rank == 0:
+                print(f"[Alg:{self.alg_name}][Rank {rank}] PEFT module applied for {model_name}")
+                model.print_trainable_parameters()
+
+        # Enable gradient checkpointing on the HF model before DS wrapping
+        if model_name != "ref" and self.gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Gradient checkpointing enabled for {model_name}")
+
+            # With gradient checkpointing + peft/lora, pytorch may require that at least
+            # one input to each checkpointed block has requires_grad=True. When the base model
+            # is frozen which is the case in lora (i.e.,requires_grad=False), it causes backward to
+            # fail or skip grads. Hence, we need to force the inputs to require grad so lora params
+            # inside checkpointed blocks still receive gradients.
+            if self.peft_config.use_peft and self.peft_config.peft_type == "lora":
+                if hasattr(model, 'enable_input_require_grads'):
+                    model.enable_input_require_grads()
+                    if rank == 0:
+                        print(f"[Alg:{self.alg_name}][Rank {rank}] enable_input_require_grads() for {model_name}")
+
         return model
+
+    def _apply_peft_module(self, model):
+        '''
+            Apply PEFT module to the model if it is enabled.
+        '''
+        if self.peft_config.peft_type == 'lora':
+            lora_config = LoraConfig(r=self.peft_config.lora_rank,
+                                    lora_alpha=self.peft_config.lora_alpha,
+                                    lora_dropout=self.peft_config.lora_dropout,
+                                    target_modules=self.peft_config.lora_target_modules,
+                                    task_type=self.peft_config.task_type)
+
+            model_peft = get_peft_model(model, lora_config)
+            print("LoRA model loaded successfully")
+            return model_peft
+
+        else:
+            raise ValueError(f"Unsupported PEFT type: {self.peft_config.peft_type}")
 
     def init_training_engine(self):
         '''
@@ -60,19 +105,12 @@ class COMMON:
             # SGRPO/CISPO has policy only
             print(f"[Alg:{self.alg_name}][Rank {rank}] Model loaded: {self.model_path}")
 
-        # Enable gradient checkpointing on the HF model before DS wrapping
-        if self.gradient_checkpointing:
-            policy_model.gradient_checkpointing_enable()
-            if value_model is not None:
-                value_model.gradient_checkpointing_enable()
-
-            print(f"[Alg:{self.alg_name}][Rank {rank}] Gradient checkpointing enabled"
-                  f"{' (policy + value)' if value_model is not None else ''}")
-
         # Initialize policy engine
+        # only pass trainable params so ds doesn't waste memory on frozen ones (e.g. LoRA)
+        trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
         self.policy_engine, self.policy_optimizer , _, _ = deepspeed.initialize(
                                                         model=policy_model,
-                                                        model_parameters=policy_model.parameters(),
+                                                        model_parameters=trainable_params,
                                                         config=ds_config_dict
                                                         )
         print(f"[Alg:{self.alg_name}][Rank {rank}] DeepSpeed engine initialized on device: {self.policy_engine.device}")
@@ -93,9 +131,10 @@ class COMMON:
             # Use separate DS config for value model if available (different lr, weight decay, grad clip)
             value_ds_config = self.deepspeed_value_config
             value_ds_dict = value_ds_config.model_dump() if value_ds_config is not None else ds_config_dict
+            trainable_value_params = [p for p in value_model.parameters() if p.requires_grad]
             self.value_engine, self.value_optimizer, _, _ = deepspeed.initialize(
                                                     model=value_model,
-                                                    model_parameters=value_model.parameters(),
+                                                    model_parameters=trainable_value_params,
                                                     config=value_ds_dict
                                                     )
             print(f"[Alg:{self.alg_name}][Rank {rank}] Value model initialized with DeepSpeed")
@@ -213,8 +252,21 @@ class COMMON:
 
         try:
             # 1. Save policy model weights (gathered fp16/bf16)
-            # os.makedirs(output_dir, exist_ok=True)
-            self.policy_engine.save_16bit_model(output_dir)
+            if self.peft_config.use_peft:
+                # Save full merged model (base + LoRA merged) so vllm can load it
+                # directly for disk-based refresh. Must gather ALL params (base + adapter)
+                # since ZeRO-3 partitions everything, not just trainable params.
+                all_params = list(self.policy_engine.module.parameters())
+                with deepspeed.zero.GatheredParameters(all_params, modifier_rank=0):
+                    if rank == 0:
+                        raw_sd = {name: param.data.cpu().clone()
+                                  for name, param in self.policy_engine.module.named_parameters()}
+                        merged_sd = self._merge_peft_state_dict(raw_sd)
+                        save_file(merged_sd, os.path.join(output_dir, "model.safetensors"))
+                        print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT policy model")
+
+            else:
+                self.policy_engine.save_16bit_model(output_dir)
 
             # Barrier to ensure all ranks finished writing before rank 0 saves config
             # Without this, rank 0 might save config before other ranks write their shards
@@ -240,7 +292,20 @@ class COMMON:
                 if value_output_dir is None:
                     value_output_dir = output_dir.rstrip('/') + "_value"
                 
-                self.value_engine.save_16bit_model(value_output_dir)
+                if self.peft_config.use_peft:
+                    # Gather ALL params (base + adapter) since ZeRO-3 partitions everything.
+                    # Then merge lora into base and save as a standalone model for vllm.
+                    all_value_params = list(self.value_engine.module.parameters())
+                    with deepspeed.zero.GatheredParameters(all_value_params, modifier_rank=0):
+                        if rank == 0:
+                            os.makedirs(value_output_dir, exist_ok=True)
+                            raw_sd = {name: param.data.cpu().clone()
+                                      for name, param in self.value_engine.module.named_parameters()}
+                            merged_sd = self._merge_peft_state_dict(raw_sd)
+                            save_file(merged_sd, os.path.join(value_output_dir, "model.safetensors"))
+                            print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT value model")
+                else:
+                    self.value_engine.save_16bit_model(value_output_dir)
 
                 # Barrier to ensure all ranks finished writing before rank 0 saves config
                 if torch.distributed.is_initialized():
@@ -262,12 +327,85 @@ class COMMON:
             print(f"[Alg:{self.alg_name}][Rank {rank}] Checkpoint save completed!")
 
         except Exception as e:
-            # log error but don't crash allows other ranks to continue
+            # The normal path has multiple barriers and we cannot know which one failed,
+            # so adding one here would cause a barrier count mismatch and deadlock.
+            # Instead, we let the error propagate and ray.get catches it and kills other actors.
             print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving checkpoint: {e}")
-            if torch.distributed.is_initialized():
-                # still need barrier even on error to prevent deadlock
-                torch.distributed.barrier()
             raise
+
+    def _merge_peft_state_dict(self, raw_state_dict):
+        '''
+            Merge LoRA adapter weights into base model weights and remap to
+            original HuggingFace parameter names so vllm can load them.
+
+            PeftModel names follow the pattern:
+              base weight:  base_model.model.{hf_name}
+              lora_A:       base_model.model.{module_path}.lora_A.default.weight
+              lora_B:       base_model.model.{module_path}.lora_B.default.weight
+              scaling:      alpha / r
+
+            Merged weight = base_weight + (alpha / r) * lora_B @ lora_A
+        '''
+        peft_prefix = "base_model.model."
+        merged = {}
+
+        # 1. Collect LoRA A/B pairs keyed by their module path
+        lora_a = {}  # module_path -> tensor
+        lora_b = {}  # module_path -> tensor
+        base_weights = {}  # peft_name -> tensor (everything that isn't lora_A/B)
+
+        for name, tensor in raw_state_dict.items():
+            if ".lora_A." in name:
+                # e.g. base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight
+                module_path = name.split(".lora_A.")[0]
+                lora_a[module_path] = tensor
+
+            elif ".lora_B." in name:
+                module_path = name.split(".lora_B.")[0]
+                lora_b[module_path] = tensor
+
+            else:
+                base_weights[name] = tensor
+
+        # 2. Merge lora into base weights
+        scaling = self.peft_config.lora_alpha / self.peft_config.lora_rank
+
+        for module_path in lora_a:
+            if module_path not in lora_b:
+                print(f"[WARNING] _merge_peft_state_dict: found lora_A but no lora_B for {module_path}")
+                continue
+
+            A = lora_a[module_path]  # [r, D]
+            B = lora_b[module_path]  # [H, r]
+            delta = (B @ A) * scaling  # [H, D]
+
+            # Find the corresponding base weight
+            # Base weight is at: {module_path}.base_layer.weight (ZeRO-3 + PEFT)
+            # or {module_path}.weight (some PEFT versions)
+            base_key = module_path + ".base_layer.weight"
+            if base_key not in base_weights:
+                base_key = module_path + ".weight"
+
+            if base_key in base_weights:
+                base_weights[base_key] = base_weights[base_key] + delta.to(base_weights[base_key].dtype)
+
+            else:
+                print(f"[WARNING] _merge_peft_state_dict: no base weight found for {module_path}")
+
+        # 3. Remap names: strip peft_prefix and .base_layer suffix
+        for peft_name, tensor in base_weights.items():
+            # Strip "base_model.model." prefix
+            if peft_name.startswith(peft_prefix):
+                hf_name = peft_name[len(peft_prefix):]
+            else:
+                hf_name = peft_name
+
+            # Strip ".base_layer" inserted by PEFT for wrapped linear layers
+            hf_name = hf_name.replace(".base_layer.", ".")
+
+            merged[hf_name] = tensor
+
+        return merged
 
     def gather_state_dict(self):
         '''
@@ -277,6 +415,9 @@ class COMMON:
               - Stage 3: uses GatheredParameters to collect partitioned params before copying.
             Only rank 0 returns the actual state_dict; others return {}.
             This is used for direct sync of weights with vllm rather than saving them on disk.
+
+            When peft is active, merges adapter weights into base weights and remaps
+            to original HF names so vllm can load them.
 
             Returns:
                 dict: {param_name: cpu_tensor} on rank 0, empty dict on other ranks.
@@ -310,7 +451,17 @@ class COMMON:
                 for name, param in zip(names, params):
                     state_dict[name] = param.data.cpu().clone()
 
+        # 3. When peft is active, named_parameters() returns peft-prefixed names. For example:
+        # base_model.model.model.layers.0.self_attn.q_proj.base_layer.weight (frozen base)
+        # base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight (adapter)
+        # however, vllm expects original names like model.layers.0.self_attn.q_proj.weight.
+        # So load_weights() won't recognize any of these and the sync silently fails. To fix this,
+        # we merge LoRA weights into base model weights and remap to original HF names so vllm can load them.
+
+        if rank == 0 and self.peft_config.use_peft:
+            state_dict = self._merge_peft_state_dict(state_dict)
+
         if rank == 0:
-            print(f"[Alg:{self.alg_name}][Rank {rank}] Gathered state_dict (zero3={is_zero3})!")
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Gathered state_dict (zero3={is_zero3}, peft={self.peft_config.use_peft})!")
 
         return state_dict

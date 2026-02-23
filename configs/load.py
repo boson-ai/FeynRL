@@ -38,9 +38,9 @@ class Run(BaseModel):
     # 0 = only at end.
     checkpoint_save_interval: int | None = 1
 
-    # NCCL configuration for multi-node clusters with multiple NICs
-    # nccl_socket_ifname: str | None = None  # e.g., "eth0", "ens3", "bond0"
-    # nccl_ib_hca: str | None = None         # e.g., "mlx5_0" for InfiniBand HCA selection
+    # NCCL configuration for multi-node clusters
+    nccl_socket_ifname: str | None = None  # e.g., "eth0", "ens3", "bond0"
+    nccl_ib_hca: str | None = None         # e.g., "mlx5_0" for InfiniBand HCA selection
 
 class Train(BaseModel):
     '''
@@ -148,6 +148,8 @@ class Peft(BaseModel):
     lora_rank: int | None = None
     lora_alpha: int | None = None
     lora_dropout: float | None = None
+    # if None, apply lora to all linear layers (peft default).
+    # otherwise, set explicitly to target specific modules, e.g. ["q_proj", "v_proj"].
     lora_target_modules: list[str] | None = None
 
 class DeepSpeed(BaseModel):
@@ -488,6 +490,14 @@ def load_and_verify(method: str, input_yaml: str, experiment_id: str, rank: int,
 
         # now verify the config
         config = Config(**raw_config)
+
+        # Normalize empty strings to None to prevent truthy-but-invalid paths
+        # (e.g., ref_model=" " is truthy but not a valid model path)
+        if config.model and config.model.ref_model is not None and config.model.ref_model.strip() == "":
+            config.model.ref_model = None
+        if config.model and config.model.value_model is not None and config.model.value_model.strip() == "":
+            config.model.value_model = None
+
         config.run.method = method
         # Update Run details
         config.run.experiment_id = experiment_id
