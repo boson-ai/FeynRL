@@ -122,11 +122,11 @@ if __name__ == "__main__":
     test_dataset.to_parquet(test_file_name)
 
     # print samples:
-    print(train_dataset[0]["prompt"])
+    print("Messages: ", train_dataset[0]["prompt"])
     print(80 * "=")
-    print(train_dataset[0]["answer"])
+    print("Answer: ", train_dataset[0]["answer"])
     print(80 * "=")
-    print(train_dataset[0]["solution"])
+    print("Solution: ", train_dataset[0]["solution"])
 
 
     print(f"Train file: {train_file_name} with {len(train_dataset)} examples.")
