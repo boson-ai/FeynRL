@@ -9,7 +9,6 @@ from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 import ray
 import time
-import mlflow
 
 # imports local methods, classes, etc.
 import configs.load as cfg # all config arguments
@@ -18,7 +17,7 @@ from data_feeds.mixed_sampler import create_prompt_dataset_and_sampler
 from misc.utils import safe_string_to_torch_dtype, get_experiment_dir_name, load_algorithm
 from rollouts.vllm_engine import VLLMRolloutEngine
 from rollouts.replay_buffer import ReplayBuffer
-from misc.logging import setup_logging, setup_viz
+from misc.logging import setup_logging, setup_tracker
 
 Algorithm_Registry = {
     # supported algorithms
@@ -514,7 +513,8 @@ if __name__ == "__main__":
                                  )
     set_random_seeds(seed=config.run.seed)
 
-    mlflow_run = setup_viz(config=config, tracking_uri=config.run.tracking_uri, rank=rank)
+    # setup remote experiment tracker
+    tracker = setup_tracker(config=config, rank=rank)
     logger.info(f"Config loaded. experiment_id: {config.run.experiment_id}")
 
     # number of gpus for training which is used by deepspeed
@@ -703,9 +703,9 @@ if __name__ == "__main__":
                 metric_str = ", ".join(f"{k}={v:.4f}" for k, v in train_metrics.items())
                 logger.info(f"[Epoch {epoch+1}][Step {step+1}/{steps_per_epoch}] {metric_str}")
 
-            # Log to MLflow every step (only rank 0)
-            if rank == 0 and mlflow_run:
-                mlflow.log_metrics({f"train/{k}": v for k, v in train_metrics.items()},
+            # Log to experiment tracker every step
+            if tracker:
+                tracker.log_metrics({f"train/{k}": v for k, v in train_metrics.items()},
                                    step=global_step)
 
         policy_version += 1
@@ -724,19 +724,21 @@ if __name__ == "__main__":
                     f"avg_kl_ref={epoch_avg.get('kl_ref', 0.0):.4f}, "
                     f"avg_kl_old={epoch_avg.get('kl_old', 0.0):.6f}")
 
-        # Log epoch metrics to MLflow
-        if rank == 0 and mlflow_run:
-            epoch_mlflow = {f"epoch/avg_{k}": v for k, v in epoch_avg.items()}
-            epoch_mlflow.update({
-                    "epoch/avg_reward": rollout_stats['avg_reward'],
-                    "epoch/total_reward": rollout_stats['total_reward'],
-                    "epoch/avg_response_len": rollout_stats['avg_response_len'],
-                    "epoch/total_samples": rollout_stats['total_samples_generated'],
-                    "epoch/rollout_time_sec": rollout_stats['rollout_time'],
-                    "epoch/tokens_per_sec": rollout_stats['tokens_per_sec'],
-                    "epoch/train_time_sec": train_time,
-                    })
-            mlflow.log_metrics(epoch_mlflow, step=epoch + 1)
+        # Log epoch metrics to experiment tracker
+        if tracker:
+            tracker.log_metrics({
+                "epoch/avg_loss": epoch_avg_loss,
+                "epoch/avg_kl_old": epoch_avg_kl_old,
+                "epoch/avg_kl_ref": epoch_avg_kl_ref,
+                "epoch/avg_clipfrac": epoch_avg_clipfrac,
+                "epoch/avg_reward": rollout_stats['avg_reward'],
+                "epoch/total_reward": rollout_stats['total_reward'],
+                "epoch/avg_response_len": rollout_stats['avg_response_len'],
+                "epoch/total_samples": rollout_stats['total_samples_generated'],
+                "epoch/rollout_time_sec": rollout_stats['rollout_time'],
+                "epoch/tokens_per_sec": rollout_stats['tokens_per_sec'],
+                "epoch/train_time_sec": train_time,
+                }, step=epoch + 1)
 
         ################
         # 5. Refresh rollout policy via direct weight sync
@@ -790,9 +792,9 @@ if __name__ == "__main__":
         logger.info(f"[Epoch {epoch+1}] Complete! Total epoch time: {epoch_time:.2f}s")
         logger.info("=" * 50)
 
-    # End MLflow run
-    if rank == 0 and mlflow_run:
-        mlflow.end_run()
+    # End experiment tracker run
+    if tracker:
+        tracker.finish()
 
     logger.info("Training completed successfully!")
     entire_training_time = time.time() - entire_training_start_time
