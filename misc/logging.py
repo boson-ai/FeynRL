@@ -1,5 +1,6 @@
 import os
 import logging
+from misc.trackers import get_tracker
 
 def setup_logging(rank: int, log_level: str = "INFO", exp_name: str = "") -> logging.Logger:
     '''
@@ -28,8 +29,8 @@ def setup_logging(rank: int, log_level: str = "INFO", exp_name: str = "") -> log
     return logger
 
 def setup_tracker(config, rank: int):
-    """
-    Setup experiment tracking using the modern ExperimentTracker interface.
-    """
-    from misc.trackers import get_tracker
+    '''
+        Setup experiment tracking using ExperimentTracker interface
+        so we can switch between different tracking backends easily.
+    '''
     return get_tracker(config, rank)

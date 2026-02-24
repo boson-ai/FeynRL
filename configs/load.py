@@ -15,6 +15,7 @@ class Run(BaseModel):
     project_name: str
     tracking_uri: str
     method: str = None
+    logger_type : str = "mlflow" # mlflow or wandb
 
     # RL-specific fields
     training_gpus: int | None = None

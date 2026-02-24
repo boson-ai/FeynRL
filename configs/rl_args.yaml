@@ -1,7 +1,8 @@
 run:
   experiment_id: "dummyrun_rl_1"
   project_name: "rasool-exp"
-  tracking_uri: "" #   e.g. "http://mymlflow.com:1234/"
+  logger_type : "mlflow" # mlflow or wandb
+  tracking_uri: "" # e.g. "http://mymlflow.com:1234/"
   checkpoint_dir: "./ckps"
   training_gpus: 2
   rollout_gpus: 2

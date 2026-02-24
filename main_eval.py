@@ -10,14 +10,13 @@ from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 import ray
 import time
-import mlflow
 from tqdm import tqdm
 
 # imports local methods, classes, etc.
 import configs.load as cfg # all config arguments
 from data_feeds.prompts import PromptsFeed # our custom pytorch dataset
 from rollouts.vllm_engine import VLLMRolloutEngine
-from misc.logging import setup_logging
+from misc.logging import setup_logging, setup_tracker
 from rollouts.replay_buffer import ReplayBuffer
 
 def set_random_seeds(seed):
@@ -266,6 +265,8 @@ if __name__ == "__main__":
 
     checkpoint_dir = config.run.checkpoint_dir
 
+    # setup remote experiment tracker
+    tracker = setup_tracker(config=config, rank=rank)
     logger.info(f"Config loaded. experiment_id: {config.run.experiment_id}")
 
     # number of gpus for rollout generation which is used by vllm
@@ -334,8 +335,18 @@ if __name__ == "__main__":
                 f"avg_response_len={rollout_stats['avg_response_len']:.1f}, "
                 f"time={rollout_stats['rollout_time']:.2f}s, tps={rollout_stats['tokens_per_sec']:.2f}")
 
-    logger.info("Evaluation completed successfully!")
+    # Log eval metrics to experiment tracker
+    if tracker:
+        tracker.log_metrics({
+            "eval/avg_reward": rollout_stats['avg_reward'],
+            "eval/total_reward": rollout_stats['total_reward'],
+            "eval/avg_response_len": rollout_stats['avg_response_len'],
+            "eval/total_samples": rollout_stats['total_samples_generated'],
+            "eval/rollout_time_sec": rollout_stats['rollout_time'],
+            "eval/tokens_per_sec": rollout_stats['tokens_per_sec'],
+        }, step=0)
 
+    logger.info("Evaluation completed successfully!")
 
     os.makedirs(checkpoint_dir, exist_ok=True)
     # save rollout stats
@@ -349,6 +360,10 @@ if __name__ == "__main__":
     with open(experiment_config_path, "w") as f:
         yaml.dump(config.model_dump(), f)
     logger.info(f"Experiment config saved to {experiment_config_path}")
+
+    # End experiment tracker run
+    if tracker:
+        tracker.finish()
 
     # Kill rollout actors to free gpu memory from vllm before ray.shutdown()
     for engine in rollout_engines:

@@ -726,11 +726,8 @@ if __name__ == "__main__":
 
         # Log epoch metrics to experiment tracker
         if tracker:
-            tracker.log_metrics({
-                "epoch/avg_loss": epoch_avg_loss,
-                "epoch/avg_kl_old": epoch_avg_kl_old,
-                "epoch/avg_kl_ref": epoch_avg_kl_ref,
-                "epoch/avg_clipfrac": epoch_avg_clipfrac,
+            epoch_tracker_metrics = {f"epoch/{k}": v for k, v in epoch_avg.items()}
+            epoch_tracker_metrics.update({
                 "epoch/avg_reward": rollout_stats['avg_reward'],
                 "epoch/total_reward": rollout_stats['total_reward'],
                 "epoch/avg_response_len": rollout_stats['avg_response_len'],
@@ -738,7 +735,8 @@ if __name__ == "__main__":
                 "epoch/rollout_time_sec": rollout_stats['rollout_time'],
                 "epoch/tokens_per_sec": rollout_stats['tokens_per_sec'],
                 "epoch/train_time_sec": train_time,
-                }, step=epoch + 1)
+            })
+            tracker.log_metrics(epoch_tracker_metrics, step=epoch + 1)
 
         ################
         # 5. Refresh rollout policy via direct weight sync
