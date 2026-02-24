@@ -662,6 +662,18 @@ if __name__ == "__main__":
                     f"avg_response_len={rollout_stats['avg_response_len']:.1f}, "
                     f"time={rollout_stats['rollout_time']:.2f}s, tps={rollout_stats['tokens_per_sec']:.2f}")
 
+        # Log rollout metrics immediately so they appear in WandB/MLflow
+        # before training starts (avoids visual lag in dashboards)
+        if tracker:
+            tracker.log_metrics({
+                "rollout/avg_reward": rollout_stats['avg_reward'],
+                "rollout/total_reward": rollout_stats['total_reward'],
+                "rollout/avg_response_len": rollout_stats['avg_response_len'],
+                "rollout/total_samples": rollout_stats['total_samples_generated'],
+                "rollout/rollout_time_sec": rollout_stats['rollout_time'],
+                "rollout/tokens_per_sec": rollout_stats['tokens_per_sec'],
+            }, step=global_step)
+
         ################
         # 2. Prepare training batches
         ################
@@ -724,17 +736,9 @@ if __name__ == "__main__":
                     f"avg_kl_ref={epoch_avg.get('kl_ref', 0.0):.4f}, "
                     f"avg_kl_old={epoch_avg.get('kl_old', 0.0):.6f}")
 
-        # Log epoch-level metrics to experiment tracker
         if tracker:
             tracker.log_metrics({
-                **{f"epoch/{k}": v for k, v in epoch_avg.items()},
-                "rollout/avg_reward": rollout_stats['avg_reward'],
-                "rollout/total_reward": rollout_stats['total_reward'],
-                "rollout/avg_response_len": rollout_stats['avg_response_len'],
-                "rollout/total_samples": rollout_stats['total_samples_generated'],
-                "rollout/rollout_time_sec": rollout_stats['rollout_time'],
-                "rollout/tokens_per_sec": rollout_stats['tokens_per_sec'],
-                "rollout/train_time_sec": train_time,
+                "train/epoch_time_sec": train_time,
             }, step=global_step)
 
         ################

@@ -92,6 +92,12 @@ class WandBTracker(ExperimentTracker):
             config=wandb_config,
         )
 
+        # Tell wandb to use "global_step" as the x-axis for all metrics.
+        # This avoids the step= parameter which causes buffering and
+        # merge/overwrite issues when multiple log() calls share a step.
+        self.wandb.define_metric("global_step")
+        self.wandb.define_metric("*", step_metric="global_step")
+
     def log_params(self, params: Dict[str, Any]):
         self.wandb.config.update(params, allow_val_change=True)
 
@@ -103,8 +109,10 @@ class WandBTracker(ExperimentTracker):
                 formatted_metrics[k] = float(v)
             except (ValueError, TypeError):
                 formatted_metrics[k] = v
-        
-        self.wandb.log(formatted_metrics, step=step)
+
+        if step is not None:
+            formatted_metrics["global_step"] = step
+        self.wandb.log(formatted_metrics)
 
     def finish(self):
         self.wandb.finish()
