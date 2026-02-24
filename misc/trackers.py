@@ -1,70 +1,69 @@
 import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Type
+import mlflow
+import wandb
+
+def _flatten_dict(d, parent_key='', sep='.'):
+    '''
+        Flatten a nested dict into dot-separated keys.
+    '''
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(_flatten_dict(v, new_key, sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
 class ExperimentTracker(ABC):
     @abstractmethod
     def log_params(self, params: Dict[str, Any]):
-        """Log hyperparameters of the experiment."""
+        '''
+           Log hyperparameters of the experiment.
+        '''
         pass
 
     @abstractmethod
     def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None):
-        """Log training or evaluation metrics."""
+        '''
+           Log training or evaluation metrics.
+        '''
         pass
 
     @abstractmethod
     def finish(self):
-        """Signal that the experiment run has ended."""
+        '''
+           Signal that the experiment run has ended.
+        '''
         pass
 
 class MLFlowTracker(ExperimentTracker):
     def __init__(self, config, tracking_uri: str):
-        import mlflow
         self.mlflow = mlflow
         self.mlflow.set_tracking_uri(tracking_uri)
         self.mlflow.set_experiment(config.run.project_name)
         self.run = self.mlflow.start_run(run_name=config.run.experiment_id)
-        
-        # Log default params
-        params = {
-            "alg_name": config.train.alg_name,
-            "model_name": config.model.name,
-            "learning_rate": config.train.lr,
-            "train_batch_size_per_gpu": config.train.train_batch_size_per_gpu,
-            "total_epochs": config.train.total_number_of_epochs,
-            "seed": config.run.seed,
-        }
-        
-        # Add grad accumulation if available
-        grad_acc = getattr(config.train, "gradient_accumulation_steps", None)
-        if grad_acc is not None:
-            params["gradient_accumulation_steps"] = grad_acc
 
-        if config.run.method in ["sl", "cl"]:
-            params["micro_batches_per_epoch"] = getattr(config.train, "micro_batches_per_epoch", None)
-            if config.run.method == "cl":
-                params["beta"] = getattr(config.train, "cl_beta", None)
-
-        elif config.run.method == "rl":
-            params.update({
-                "train_steps_per_epoch": getattr(config.train, "train_steps_per_epoch", None),
-                "n_samples": getattr(config.rollout, "n_samples", None),
-                "max_tokens": getattr(config.rollout, "max_tokens", None),
-                "kl_coeff": getattr(config.train, "kl_coeff", None),
-                "clip_low": getattr(config.train, "clip_low", None),
-                "clip_high": getattr(config.train, "clip_high", None),
-                "entropy_coeff": getattr(config.train, "entropy_coeff", None),
-                "training_gpus": getattr(config.run, "training_gpus", None),
-                "rollout_gpus": getattr(config.run, "rollout_gpus", None),
-            })
-        
-        # Filter None values
-        params = {k: v for k, v in params.items() if v is not None}
+        # Log all config parameters with section-prefixed dot-notation keys
+        full_config = config.model_dump()
+        flat_params = _flatten_dict(full_config)
+        # Filter None values and convert non-scalar types to strings for mlflow
+        params = {}
+        for k, v in flat_params.items():
+            if v is None:
+                continue
+            if isinstance(v, (list, tuple, dict)):
+                v = str(v)
+            params[k] = v
         self.log_params(params)
 
     def log_params(self, params: Dict[str, Any]):
-        self.mlflow.log_params(params)
+        # MLflow has a batch size limit; log in chunks of 100
+        items = list(params.items())
+        for i in range(0, len(items), 100):
+            self.mlflow.log_params(dict(items[i:i+100]))
 
     def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None):
         self.mlflow.log_metrics(metrics, step=step)
@@ -74,28 +73,18 @@ class MLFlowTracker(ExperimentTracker):
 
 class WandBTracker(ExperimentTracker):
     def __init__(self, config):
-        import wandb
         self.wandb = wandb
-        
+
         # Load API key from file
         key_path = "./.wandb_key"
         if os.path.exists(key_path):
             with open(key_path, "r") as f:
                 api_key = f.read().strip()
             os.environ["WANDB_API_KEY"] = api_key
-        
-        # Initialize wandb with combined config
-        # We try to convert config objects to dicts where possible
-        wandb_config = {}
-        for section in ["train", "run", "model", "rollout", "data", "reward"]:
-            if hasattr(config, section):
-                sec_obj = getattr(config, section)
-                if hasattr(sec_obj, "__dict__"):
-                    wandb_config.update(sec_obj.__dict__)
-                elif hasattr(sec_obj, "dict"): # pydantic v1
-                    wandb_config.update(sec_obj.dict())
-                elif hasattr(sec_obj, "model_dump"): # pydantic v2
-                    wandb_config.update(sec_obj.model_dump())
+
+        # Log full config — wandb handles nested dicts natively,
+        # so section-prefixed keys avoid collisions across sections.
+        wandb_config = config.model_dump(exclude_none=True)
 
         self.run = self.wandb.init(
             project=config.run.project_name,
@@ -121,13 +110,12 @@ class WandBTracker(ExperimentTracker):
         self.wandb.finish()
 
 class TrackerRegistry:
-    """
-    Registry for experiment trackers.
-
-    Notes:
-    - Only rank 0 will have a tracker.
-    - Default tracker is mlflow.
-    """
+    '''
+        Registry for experiment trackers.
+        Notes:
+        - Only rank 0 will have a tracker.
+        - Default tracker is mlflow.
+    '''
     _trackers: Dict[str, Type[ExperimentTracker]] = {
         "mlflow": MLFlowTracker,
         "wandb": WandBTracker
@@ -161,5 +149,7 @@ class TrackerRegistry:
             return None
 
 def get_tracker(config, rank: int) -> Optional[ExperimentTracker]:
-    """Factory function to get the appropriate experiment tracker."""
+    '''
+        Factory function to get the appropriate experiment tracker.
+    '''
     return TrackerRegistry.get_tracker(config, rank)
