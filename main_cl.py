@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader
 import torch.distributed
 from tqdm import tqdm
 import gc
-import mlflow
 import time
 from peft import get_peft_model, LoraConfig
 
@@ -18,7 +17,7 @@ import configs.load as cfg# all config arguments
 from data_feeds.preference import PreferenceFeed
 from data_feeds.mixed_sampler import create_dataset_and_sampler
 from misc.utils import safe_string_to_torch_dtype, get_experiment_dir_name, load_algorithm
-from misc.logging import setup_logging, setup_viz
+from misc.logging import setup_logging, setup_tracker
 
 
 Algorithm_Registry = {
@@ -238,8 +237,8 @@ if __name__ == "__main__":
                                  )
     set_random_seeds(seed=config.run.seed)
 
-    # Setup MLflow (only on rank 0)
-    mlflow_run = setup_viz(config=config, tracking_uri=config.run.tracking_uri, rank=rank)
+    # setup remote experiment tracker
+    tracker = setup_tracker(config=config, rank=rank)
     logger.info(f"Config loaded. experiment_id: {config.run.experiment_id}")
 
     ########
@@ -382,8 +381,8 @@ if __name__ == "__main__":
                                            'rejected_rewards': metric['rejected_rewards'],
                                            'reward_accuracies': metric['reward_accuracies'],
                                            })
-                if mlflow_run and model_engine.is_gradient_accumulation_boundary():
-                    mlflow.log_metrics({
+                if tracker and model_engine.is_gradient_accumulation_boundary():
+                    tracker.log_metrics({
                         "train/loss": metric['loss'],
                         "train/chosen_rewards": metric['chosen_rewards'],
                         "train/rejected_rewards": metric['rejected_rewards'],
@@ -435,8 +434,8 @@ if __name__ == "__main__":
         if rank == 0:
             val_summary = " | ".join(f"{k}: {v:.4f}" for k, v in global_avgs.items())
             print(f"Epoch {epoch+1}, Validation: {val_summary}")
-            if mlflow_run:
-                mlflow.log_metrics({
+            if tracker:
+                tracker.log_metrics({
                     f"val/{k}": v for k, v in global_avgs.items()
                 }, step=global_step)
 
@@ -479,6 +478,6 @@ if __name__ == "__main__":
 
     logger.info("Training completed successfully!")
 
-    # End MLflow run cleanly
-    if rank == 0 and mlflow_run:
-        mlflow.end_run()
+    # End experiment tracker run
+    if tracker:
+        tracker.finish()
