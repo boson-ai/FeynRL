@@ -26,7 +26,7 @@ class ReplayBuffer(Dataset):
         '''
             Add a batch of sequences to the replay buffer.
             Note that I have listed here everything that is collected in rollout_engine,
-            but not all of them are used here.
+            but not all of them are used here. Each example in the batch has the following items in it:
             - iter: int                  --> [Not added to replay buffer for now]
             - policy_version: int        --> [Not added to replay buffer for now]
             - loaded_version: int        --> [Not added to replay buffer for now]
@@ -50,8 +50,16 @@ class ReplayBuffer(Dataset):
             - response_text: str
             - response_len: int
         '''
+        truncated_count = 0
         for sample in samples:
             if sample["response_len"] == 0:
+                continue
+
+            seq_len = sample["input_ids"].numel()
+            # samples which are longer than max_seq_len are truncated,
+            # otherwise there would be issuues with done, reward, mask, etc.
+            if seq_len > self.max_seq_len:
+                truncated_count += 1
                 continue
 
             self.add(input_ids=sample["input_ids"],
@@ -61,6 +69,11 @@ class ReplayBuffer(Dataset):
                      dones=sample["pred_dones"],
                      old_logprobs=sample["pred_old_logprobs"],
                      )
+
+        if truncated_count > 0:
+            print(f"[ReplayBuffer] {truncated_count}/{len(samples)} sequences truncated "
+                  f"from prompt+response to max_seq_len={self.max_seq_len}. "
+                  f"Consider reducing rollout max_tokens in rollouts or increasing max_seq_len in data configs.")
 
     def add(self,
             input_ids: torch.Tensor,
