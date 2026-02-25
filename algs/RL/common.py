@@ -425,7 +425,9 @@ class COMMON:
         rank = torch.distributed.get_rank()
         state_dict = {}
 
-        # 1. Get all parameters
+        # 1. Collect parameter references without GPU allocation.
+        # With ZeRO-3, each param is still partitioned here, only the local
+        # shard lives on GPU. This just builds python lists of references.
         # Must be called on ALL ranks as zero-3 requires collective participation.
         params = []
         names = []
@@ -437,13 +439,14 @@ class COMMON:
         is_zero3 = hasattr(params[0], 'ds_id') if params else False
 
         if is_zero3:
-            # gather partitioned parameters in a single collective call
-            with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
-                if rank == 0:
-                    for name, param in zip(names, params):
-                        # .data avoids autograd overhead.
-                        # .cpu().clone() ensures the tensor lives in CPU memory and is independent of the
-                        # ZeRO-3 partition buffer which gets freed after the context.
+            # Gather one parameter at a time to avoid GPU oom. Gathering all params
+            # at once would need the full model size in free GPU memory, which is
+            # rarely available after training. Per-param gathering only needs space
+            # for the largest single parameter (e.g., ~500MB for a 14B model). All ranks
+            # must enter each context as a collective op.
+            for name, param in zip(names, params):
+                with deepspeed.zero.GatheredParameters([param], modifier_rank=0):
+                    if rank == 0:
                         state_dict[name] = param.data.cpu().clone()
         else:
             # Stages 0/1/2: params are already full, just copy on rank 0
