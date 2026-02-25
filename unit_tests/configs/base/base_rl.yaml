@@ -3,7 +3,7 @@ run:
   project_name: "test-leanrl"
   logger_type : "mlflow"
   tracking_uri: "" 
-  checkpoint_dir: "./tests/results/checkpoints"
+  checkpoint_dir: "./unit_tests/results/checkpoints"
   training_gpus: 1
   rollout_gpus: 1
   ray_master_port: 29505
@@ -66,8 +66,8 @@ peft:
 
 data:
   train_ratios: {"train_rl": 1.0}
-  train_files_path: ["tests/data/train_rl.parquet"]
-  val_files_path: ["tests/data/val_rl.parquet"]
+  train_files_path: ["unit_tests/data/train_rl.parquet"]
+  val_files_path: ["unit_tests/data/val_rl.parquet"]
   num_workers: 0
   max_seq_len: 256
   prompt_key: "prompt"

@@ -63,10 +63,10 @@ def create_sl_data(path):
     print(f"Created SL dummy data at {path}")
 
 if __name__ == "__main__":
-    os.makedirs("tests/data", exist_ok=True)
-    create_rl_data("tests/data/train_rl.parquet")
-    create_rl_data("tests/data/val_rl.parquet")
-    create_cl_data("tests/data/train_cl.parquet")
-    create_cl_data("tests/data/val_cl.parquet")
-    create_sl_data("tests/data/train_sl.parquet")
-    create_sl_data("tests/data/val_sl.parquet")
+    os.makedirs("unit_tests/data", exist_ok=True)
+    create_rl_data("unit_tests/data/train_rl.parquet")
+    create_rl_data("unit_tests/data/val_rl.parquet")
+    create_cl_data("unit_tests/data/train_cl.parquet")
+    create_cl_data("unit_tests/data/val_cl.parquet")
+    create_sl_data("unit_tests/data/train_sl.parquet")
+    create_sl_data("unit_tests/data/val_sl.parquet")

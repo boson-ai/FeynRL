@@ -1,18 +1,16 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=1,2
-
 # Configuration
-TEST_CONFIG_DIR="./tests/configs"
-LOG_DIR="./logs/tests/results"
+TEST_CONFIG_DIR="./unit_tests/configs"
+LOG_DIR="./logs/unit_tests/results"
 mkdir -p "$LOG_DIR"
 
 # Algorithms to test
 ALGS=("sgrpo" "cispo" "ppo" "dpo" "sft")
 
 # Refresh configs from abstract bases
-python tests/generate_test_configs.py
-sudo python tests/create_dummy_data.py
+python unit_tests/utils/generate_test_configs.py
+sudo python unit_tests/utils/create_dummy_data.py
 
 # Collect results for summary
 declare -a SUMMARY_TABLE
@@ -106,10 +104,10 @@ echo ""
 
 # Cleanup artifacts to restore workspace status
 echo "Cleaning up generated artifacts (configs, data, checkpoints)..."
-sudo rm -rf ./tests/results/
-sudo rm -rf ./tests/data
+sudo rm -rf ./unit_tests/results/
+sudo rm -rf ./unit_tests/data
 # Remove only the generated top-level configs, preserving the base/ directory
-sudo rm -f ./tests/configs/*.yaml
+sudo rm -f ./unit_tests/configs/*.yaml
 # Also cleanup any leftover wandb/mlrun metadata if present in root
 sudo rm -rf ./wandb/
 sudo rm -rf ./mlruns/

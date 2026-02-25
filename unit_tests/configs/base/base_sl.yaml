@@ -3,7 +3,7 @@ run:
   project_name: "test-leanrl"
   logger_type : "mlflow"
   tracking_uri: "" 
-  checkpoint_dir: "./tests/results/checkpoints_sl"
+  checkpoint_dir: "./unit_tests/results/checkpoints_sl"
   seed: 42
 
 train:
@@ -36,8 +36,8 @@ peft:
 
 data:
   train_ratios: {"train_sl": 1.0}
-  train_files_path: ["tests/data/train_sl.parquet"]
-  val_files_path: ["tests/data/val_sl.parquet"]
+  train_files_path: ["unit_tests/data/train_sl.parquet"]
+  val_files_path: ["unit_tests/data/val_sl.parquet"]
   num_workers: 0
   max_seq_len: 256
   prompt_key: "prompt"

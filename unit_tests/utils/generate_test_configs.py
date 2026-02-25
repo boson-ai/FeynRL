@@ -2,9 +2,9 @@ import yaml
 import os
 import copy
 
-BASE_RL = "tests/configs/base/base_rl.yaml"
-BASE_CL = "tests/configs/base/base_cl.yaml"
-BASE_SL = "tests/configs/base/base_sl.yaml"
+BASE_RL = "unit_tests/configs/base/base_rl.yaml"
+BASE_CL = "unit_tests/configs/base/base_cl.yaml"
+BASE_SL = "unit_tests/configs/base/base_sl.yaml"
 
 def merge_dicts(base, override):
     for k, v in override.items():
@@ -72,7 +72,7 @@ def generate_configs():
             else:
                 final_config['model']['ref_model_offload_to_cpu'] = True
         
-        output_path = f"tests/configs/{alg}.yaml"
+        output_path = f"unit_tests/configs/{alg}.yaml"
         with open(output_path, 'w') as f:
             yaml.safe_dump(final_config, f, default_flow_style=False)
         print(f"Generated {output_path} (Stage: {stage}, Logger: {logger})")
