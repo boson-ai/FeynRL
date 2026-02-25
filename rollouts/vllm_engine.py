@@ -233,7 +233,7 @@ class VLLMRolloutEngine:
                 )
 
         return SamplingParams(
-            seed=self.seed + self.engine_id,
+            seed=self.seed + self.engine_id * 1000,
             n=self.n_samples,
 
             temperature=self.temperature,
@@ -323,6 +323,8 @@ class VLLMRolloutEngine:
                                      f"but loaded_version={int(self.loaded_version)}. ")
 
                 assert self.vllm_engine is not None, f"{self.model_path} not loaded."
+                # Rotate seed each epoch so the sampling rng varies across iterations.
+                self.sampling_params.seed = self.seed + self.engine_id * 1000 + (current_iter + 1) * 1000000000
                 self.log(f"Generating completions for {len(prompts)} prompts with {self.n_samples} samples each")
                 generated_outputs = self.vllm_engine.generate(prompts,
                                                              sampling_params=self.sampling_params,
