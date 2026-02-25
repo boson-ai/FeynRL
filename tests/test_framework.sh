@@ -1,10 +1,5 @@
 #!/bin/bash
 
-# load environment
-source /path/to/loc/murdock/anaconda3/etc/profile.d/conda.sh
-conda activate /path/to/loc/murdock/anaconda3/envs/leanrl-dev
-PYTHON="/path/to/loc/murdock/anaconda3/envs/leanrl-dev/bin/python"
-TORCHRUN="/path/to/loc/murdock/anaconda3/envs/leanrl-dev/bin/torchrun"
 export CUDA_VISIBLE_DEVICES=1,2
 
 # Configuration
