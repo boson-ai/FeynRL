@@ -13,17 +13,17 @@ Our goal is to build something that lets you do both. You should be able to run 
 
 ## Why not run rollout engines fully in parallel (continuous generation) while training runs?
 
-That is a good point that not overlapping rollout and training can leave some GPU capacity on the table. The reason this framework doesn't default to "always-on" rollout is mainly about data off-policyness and algorithmic bottlenecks, not just throughput.
+That’s a good point; not overlapping rollout and training can leave some GPU capacity unused. The reason this framework doesn't default to "always-on" rollout is mainly about data off-policyness and algorithmic bottlenecks, not just throughput.
 
-1. **On-policy methods don't benefit much from stale, continuously generated data.** Most practical RL post-training recipes for large models are effectively on-policy (or close to it) and rely on mechanisms like PPO-style clipping (or related constraints) to stay stable when the policy changes. If a rollout engine keeps generating while the policy is being updated, a growing fraction of those samples quickly become off-policy. Once the divergence is large, clipping/constraints tend to squash the update signal and many samples contribute little to no useful gradient. In other words, "more generations" is not automatically "more learning" if those generations are produced by a policy that is already out of date relative to the current optimizer state.
+1. **On-policy methods don't benefit much from stale, continuously generated data.** Most practical RL post-training recipes for large models are effectively "on-policy" (or close to it) and rely on mechanisms like PPO-style clipping (or related constraints) to stay stable when the policy changes. If a rollout engine keeps generating while the policy is being updated, a growing fraction of those samples quickly become off-policy. Once the divergence is large, clipping/constraints tend to squash the update signal and many samples contribute little to no useful gradient. In other words, "more generations" is not automatically "more learning" if those generations are produced by a policy that is already out of date relative to the current optimizer state.
 
-2. **The limiting factor is usually algorithm reliability, not raw rollout speed.** In practice, the hard part of RL for large models isn't only that generation is expensive, it's that training can be brittle: rewards can be sparse, noisy, or misspecified; credit assignment is hard; small implementation details matter; and optimization can destabilize easily. If the underlying method is not reliably improving the policy when it should, increasing rollout throughput often just increases complexity (queues, buffering, off-policy correction, synchronization) without improving outcomes.
+2. **The limiting factor is usually algorithm reliability, not raw rollout speed.** In practice, the hard part of RL for large models isn’t only that generation is expensive, it’s the underlying algorithmic limitations. If the underlying method isn’t reliably improving the policy when it should, increasing rollout throughput often just increases complexity (queues, buffering, off-policy correction, synchronization) without improving outcomes.
 
 This does not imply that system throughput is unimportant or can be ignored. It emphasizes that RL itself has many fundamental challenges, and system optimization pays off most once the algorithm is in a healthy place. That said, we do plan to adopt proven patterns from other works as long as we can do it without much sacrificing the core goals of this repo.
 
 ## Other frameworks include many rollout-engine system improvements. Why don't you include them?
 
-We try to include recent improvements as much as possible, especially with regard to the rollout engine—and this is one of the reasons we open-sourced the repo.
+We'll try to include recent improvements as much as possible, especially with regard to the rollout engine—and this is one of the reasons we open-sourced the repo.
 
 That said, some of these improvements have only a marginal impact on performance, but add significant complexity to the pipeline (see response to previous question). In cases like that, we avoid including them by default. However, we are open to PRs that improve system throughput without sacrificing the core goals of this repo.
 
