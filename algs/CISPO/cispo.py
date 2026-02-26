@@ -193,6 +193,11 @@ class CISPO(COMMON):
         ga_pi_attr = getattr(self.policy_engine, 'gradient_accumulation_steps', 1)
         ga_pi = int(ga_pi_attr() if callable(ga_pi_attr) else ga_pi_attr)
 
+        # If num_micro is not divisible by ga_pi, the last GA bucket has fewer
+        # micro-batches. DeepSpeed still divides by ga_pi, so we must scale
+        # those losses up by ga_pi/remainder to get the correct mean gradient.
+        ga_remainder = num_micro % ga_pi
+
         # track metrics across all micro-batches
         all_metrics = []
         for step, micro_batch in enumerate(progress_bar):
@@ -260,6 +265,10 @@ class CISPO(COMMON):
             # ga_pi to keep the effective scale consistent with standard GA.
             if self.update_only_after_full_replay:
                 pi_loss = pi_loss * (ga_pi / num_micro)
+
+            else:
+                if ga_remainder != 0 and step >= (num_micro - ga_remainder):
+                    pi_loss = pi_loss * (ga_pi / ga_remainder)
 
             # For DeepSpeed, we must coordinate is_boundary with the backward pass.
             self.policy_engine.set_gradient_accumulation_boundary(is_boundary)
