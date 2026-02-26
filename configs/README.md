@@ -46,7 +46,7 @@ These parameters are consistent across all experiment types and are used for exp
 | `alg_name`               | `train`   | Reinforcement learning algorithm                 | Allowed values: `"sgrpo"`, `"cispo"`, `"ppo"` | `"ppo"`                  |
 | `train_steps_per_epoch`  | `train`   | Optimizer steps to perform per epoch             | Integer ≥ 1                                   | `5`                      |
 | `kl_coeff`               | `train`   | Weight of KL divergence penalty                  | Float ≥ 0                                     | `0.001`                  |
-| `clip_low` / `clip_high` | `train`   | PPO/GRPO policy clipping bounds                  | Float                                         | `0.2`                    |
+| `clip_low` / `clip_high` | `train`   | PPO/GRPO policy clipping bounds                  | Float ≥ 0                                     | `0.2`                    |
 | `reward_func`            | `reward`  | Reward function name in `rewards/` module        | String                                        | `"gsm8k_reward_func"`    |
 | `n_samples`              | `rollout` | Number of completions per prompt                 | Integer ≥ 1                                   | `4`, `8`, `16`           |
 | `max_tokens`             | `rollout` | Max completion tokens per rollout                | Integer ≥ 1                                   | `512`, `1024`            |
