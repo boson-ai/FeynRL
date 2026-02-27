@@ -328,7 +328,7 @@ class VLLMRolloutEngine:
                 generated_outputs = self.vllm_engine.generate(prompts,
                                                              sampling_params=self.sampling_params,
                                                              use_tqdm=False)
-                self.log(f"Generation complete for {len(prompts)} prompts")
+                self.log(f"Generation complete for {len(prompts)} prompts with policy version {policy_version}")
 
                 # generated_outputs has prompt_ids and other outputs
                 # this works even if n_samples >= 1
