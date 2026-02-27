@@ -263,10 +263,10 @@ class COMMON:
                 # since ZeRO-3 partitions everything, not just trainable params.
                 # Gather one parameter at a time to avoid gpu OOM as gathering all at once
                 # would temporarily materialize the entire model on every gpu.
-                raw_sd = self._gather_params_for_save(self.policy_engine.module, rank)
+                raw_sd = self.gather_params_for_save(self.policy_engine.module, rank)
                 if rank == 0:
                     os.makedirs(output_dir, exist_ok=True)
-                    merged_sd = self._merge_peft_state_dict(raw_sd)
+                    merged_sd = self.merge_peft_state_dict(raw_sd)
                     save_file(merged_sd, os.path.join(output_dir, "model.safetensors"))
                     print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT policy model")
 
@@ -299,10 +299,10 @@ class COMMON:
                 
                 if self.peft_config.use_peft:
                     # Gather one parameter at a time to avoid GPU OOM (same as policy save).
-                    raw_sd = self._gather_params_for_save(self.value_engine.module, rank)
+                    raw_sd = self.gather_params_for_save(self.value_engine.module, rank)
                     if rank == 0:
                         os.makedirs(value_output_dir, exist_ok=True)
-                        merged_sd = self._merge_peft_state_dict(raw_sd)
+                        merged_sd = self.merge_peft_state_dict(raw_sd)
                         save_file(merged_sd, os.path.join(value_output_dir, "model.safetensors"))
                         print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT value model")
                 else:
@@ -334,7 +334,7 @@ class COMMON:
             print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving checkpoint: {e}")
             raise
 
-    def _gather_params_for_save(self, module, rank):
+    def gather_params_for_save(self, module, rank):
         '''
             Gather all parameters from a deepspeed wrapped module one at a time.
             Returns {name: cpu_tensor} on rank 0, empty dict on others.
@@ -361,7 +361,7 @@ class COMMON:
 
         return state_dict
 
-    def _merge_peft_state_dict(self, raw_state_dict):
+    def merge_peft_state_dict(self, raw_state_dict):
         '''
             Merge LoRA adapter weights into base model weights and remap to
             original HuggingFace parameter names so vllm can load them.
@@ -400,7 +400,7 @@ class COMMON:
 
         for module_path in lora_a:
             if module_path not in lora_b:
-                print(f"[WARNING] _merge_peft_state_dict: found lora_A but no lora_B for {module_path}")
+                print(f"[WARNING] merge_peft_state_dict: found lora_A but no lora_B for {module_path}")
                 continue
 
             A = lora_a[module_path]  # [r, D]
@@ -418,7 +418,7 @@ class COMMON:
                 base_weights[base_key] = base_weights[base_key] + delta.to(base_weights[base_key].dtype)
 
             else:
-                print(f"[WARNING] _merge_peft_state_dict: no base weight found for {module_path}")
+                print(f"[WARNING] merge_peft_state_dict: no base weight found for {module_path}")
 
         # 3. Remap names: strip peft_prefix and .base_layer suffix
         for peft_name, tensor in base_weights.items():
@@ -438,61 +438,29 @@ class COMMON:
     def gather_state_dict(self):
         '''
             Gather policy weights into a full state_dict on rank 0.
-            Works for all ds stages (0/1/2/3):
-              - Stage 0/1/2: params are already full on each rank, so rank 0 copies directly.
-              - Stage 3: uses GatheredParameters to collect partitioned params before copying.
-            Only rank 0 returns the actual state_dict; others return {}.
             This is used for direct sync of weights with vllm rather than saving them on disk.
-
-            When peft is active, merges adapter weights into base weights and remaps
-            to original HF names so vllm can load them.
+            gather_params_for_save handles ZeRO-3 collective gathering and then
+            merges PEFT names when active so vllm can load them.
 
             Returns:
                 dict: {param_name: cpu_tensor} on rank 0, empty dict on other ranks.
         '''
         rank = torch.distributed.get_rank()
-        state_dict = {}
 
-        # 1. Collect parameter references without GPU allocation.
-        # With ZeRO-3, each param is still partitioned here, only the local
-        # shard lives on GPU. This just builds python lists of references.
-        # Must be called on ALL ranks as zero-3 requires collective participation.
-        params = []
-        names = []
-        for name, param in self.policy_engine.module.named_parameters():
-            params.append(param)
-            names.append(name)
+        # gather_params_for_save handles ZeRO-3 collective gathering and works
+        # for all DS stages. Must be called on ALL ranks.
+        state_dict = self.gather_params_for_save(self.policy_engine.module, rank)
 
-        # 2. Check if we're using stage-3 where parameters are partitioned
-        is_zero3 = hasattr(params[0], 'ds_id') if params else False
-
-        if is_zero3:
-            # Gather one parameter at a time to avoid GPU oom. Gathering all params
-            # at once would need the full model size in free GPU memory, which is
-            # rarely available after training. Per-param gathering only needs space
-            # for the largest single parameter (e.g., ~500MB for a 14B model). All ranks
-            # must enter each context as a collective op.
-            for name, param in zip(names, params):
-                with deepspeed.zero.GatheredParameters([param], modifier_rank=0):
-                    if rank == 0:
-                        state_dict[name] = param.data.cpu().clone()
-        else:
-            # Stages 0/1/2: params are already full, just copy on rank 0
-            if rank == 0:
-                for name, param in zip(names, params):
-                    state_dict[name] = param.data.cpu().clone()
-
-        # 3. When peft is active, named_parameters() returns peft-prefixed names. For example:
+        # When peft is active, named_parameters() returns peft-prefixed names. For example:
         # base_model.model.model.layers.0.self_attn.q_proj.base_layer.weight (frozen base)
         # base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight (adapter)
         # however, vllm expects original names like model.layers.0.self_attn.q_proj.weight.
         # So load_weights() won't recognize any of these and the sync silently fails. To fix this,
         # we merge LoRA weights into base model weights and remap to original HF names so vllm can load them.
-
         if rank == 0 and self.peft_config.use_peft:
-            state_dict = self._merge_peft_state_dict(state_dict)
+            state_dict = self.merge_peft_state_dict(state_dict)
 
         if rank == 0:
-            print(f"[Alg:{self.alg_name}][Rank {rank}] Gathered state_dict (zero3={is_zero3}, peft={self.peft_config.use_peft})!")
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Gathered state_dict (peft={self.peft_config.use_peft})!")
 
         return state_dict
