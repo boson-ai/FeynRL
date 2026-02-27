@@ -43,26 +43,6 @@ Trajectory generation is powered by **vLLM**, which provides:
 - **Tensor Parallelism**: Capability to shard large models across multiple GPUs for rollout.
 - **Dynamic Loading**: Support for updating policy weights during training.
 
-## Data Flow & Synchronization
-
-The following diagram illustrates the interaction between the core components during a typical RL training loop:
-
-```mermaid
-sequenceDiagram
-    participant R as Ray Orchestrator
-    participant T as Training Engine (DeepSpeed)
-    participant V as Rollout Engine (vLLM)
-    participant B as Replay Buffer
-
-    loop Training Epochs
-        R->>V: Generate Rollouts (with current policy)
-        V->>B: Store Trajectories (Prompts, Completions, Rewards)
-        R->>T: Train Step (sample from Replay Buffer)
-        T->>T: Compute Gradients & Update Weights
-        T->>V: Weight Sync (Update Rollout Policy)
-    end
-```
-
 ### Weight Synchronization
 FeynRL supports two methods for syncing weights from the training engine to the rollout workers:
 1. **Direct Sync**: Weights are pushed directly via GPU/system memory, minimizing disk I/O and latency.
