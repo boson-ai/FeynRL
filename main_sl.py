@@ -63,6 +63,13 @@ def init_rank_world_size():
 
         torch.cuda.set_device(local_rank)
 
+    # Log resolved distributed env on rank 0 for debugging multi-node setups
+    if rank == 0:
+        master_addr = os.environ.get('MASTER_ADDR', 'not set')
+        master_port = os.environ.get('MASTER_PORT', 'not set')
+        print(f"[Distributed] rank={rank}, world_size={world_size}, local_rank={local_rank}, "
+              f"MASTER_ADDR={master_addr}, MASTER_PORT={master_port}")
+
     return rank, world_size, local_rank
 
 def apply_peft_module(model, peft_config):
@@ -88,7 +95,8 @@ def load_models_and_tokenizer(model_name, model_dtype, trust_remote_code, attn_i
         Load models and tokenizer.
     '''
     assert model_dtype != 'auto', "dtype must not be auto to avoid any precision issues"
-    assert attn_impl=='' or attn_impl in ['eager', 'flash_attention_2'], "attn_impl must be one of 'eager', 'flash_attention_2' or empty string"
+    assert attn_impl is None or attn_impl == '' or attn_impl in ['eager', 'flash_attention_2'], \
+        "attn_impl must be one of None, '', 'eager', 'flash_attention_2'"
 
     # convert string to torch dtype if it is not already
     model_dtype = safe_string_to_torch_dtype(model_dtype)
