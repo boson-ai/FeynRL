@@ -261,14 +261,14 @@ class COMMON:
                 # Save full merged model (base + LoRA merged) so vllm can load it
                 # directly for disk-based refresh. Must gather ALL params (base + adapter)
                 # since ZeRO-3 partitions everything, not just trainable params.
-                all_params = list(self.policy_engine.module.parameters())
-                with deepspeed.zero.GatheredParameters(all_params, modifier_rank=0):
-                    if rank == 0:
-                        raw_sd = {name: param.data.cpu().clone()
-                                  for name, param in self.policy_engine.module.named_parameters()}
-                        merged_sd = self._merge_peft_state_dict(raw_sd)
-                        save_file(merged_sd, os.path.join(output_dir, "model.safetensors"))
-                        print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT policy model")
+                # Gather one parameter at a time to avoid gpu OOM as gathering all at once
+                # would temporarily materialize the entire model on every gpu.
+                raw_sd = self._gather_params_for_save(self.policy_engine.module, rank)
+                if rank == 0:
+                    os.makedirs(output_dir, exist_ok=True)
+                    merged_sd = self._merge_peft_state_dict(raw_sd)
+                    save_file(merged_sd, os.path.join(output_dir, "model.safetensors"))
+                    print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT policy model")
 
             else:
                 self.policy_engine.save_16bit_model(output_dir)
@@ -298,17 +298,13 @@ class COMMON:
                     value_output_dir = output_dir.rstrip('/') + "_value"
                 
                 if self.peft_config.use_peft:
-                    # Gather ALL params (base + adapter) since ZeRO-3 partitions everything.
-                    # Then merge lora into base and save as a standalone model for vllm.
-                    all_value_params = list(self.value_engine.module.parameters())
-                    with deepspeed.zero.GatheredParameters(all_value_params, modifier_rank=0):
-                        if rank == 0:
-                            os.makedirs(value_output_dir, exist_ok=True)
-                            raw_sd = {name: param.data.cpu().clone()
-                                      for name, param in self.value_engine.module.named_parameters()}
-                            merged_sd = self._merge_peft_state_dict(raw_sd)
-                            save_file(merged_sd, os.path.join(value_output_dir, "model.safetensors"))
-                            print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT value model")
+                    # Gather one parameter at a time to avoid GPU OOM (same as policy save).
+                    raw_sd = self._gather_params_for_save(self.value_engine.module, rank)
+                    if rank == 0:
+                        os.makedirs(value_output_dir, exist_ok=True)
+                        merged_sd = self._merge_peft_state_dict(raw_sd)
+                        save_file(merged_sd, os.path.join(value_output_dir, "model.safetensors"))
+                        print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT value model")
                 else:
                     self.value_engine.save_16bit_model(value_output_dir)
 
@@ -337,6 +333,33 @@ class COMMON:
             # Instead, we let the error propagate and ray.get catches it and kills other actors.
             print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving checkpoint: {e}")
             raise
+
+    def _gather_params_for_save(self, module, rank):
+        '''
+            Gather all parameters from a deepspeed wrapped module one at a time.
+            Returns {name: cpu_tensor} on rank 0, empty dict on others.
+            Must be called on ALL ranks for ZeRO-3 collective correctness.
+        '''
+        params = []
+        names = []
+        for name, param in module.named_parameters():
+            params.append(param)
+            names.append(name)
+
+        is_zero3 = hasattr(params[0], 'ds_id') if params else False
+        state_dict = {}
+
+        if is_zero3:
+            for name, param in zip(names, params):
+                with deepspeed.zero.GatheredParameters([param], modifier_rank=0):
+                    if rank == 0:
+                        state_dict[name] = param.data.cpu().clone()
+        else:
+            if rank == 0:
+                for name, param in zip(names, params):
+                    state_dict[name] = param.data.cpu().clone()
+
+        return state_dict
 
     def _merge_peft_state_dict(self, raw_state_dict):
         '''
