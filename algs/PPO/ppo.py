@@ -4,6 +4,7 @@ import numpy as np
 from tqdm import tqdm
 from typing import Any
 import ray
+import random
 
 # Since the following functions are the same for all algorithms
 # we load them from common.py:
@@ -395,6 +396,10 @@ class PPO(COMMON):
         # like same iteration order, same length.
         num_micro = len(micro_batches)
         paired = list(zip(micro_batches, precomputed_gae))
+
+        # Shuffle so each steps_per_epoch iteration micro_batches are processed in a
+        # different sequence to avoid systematic bias from GA boundary placement.
+        random.shuffle(paired)
 
         # torch.distributed.get_rank() would be the same thing as engine_id
         if engine_id == 0:

@@ -3,6 +3,7 @@ import numpy as np
 from tqdm import tqdm
 from typing import Any
 import ray
+import random
 
 # load follwoings from common.py:
 # _load_single_model, init_training_engine, policy_forward,
@@ -172,6 +173,10 @@ class SGRPO(COMMON):
             "ranks via prepare_training_batches padding"
 
         device = self.policy_engine.device
+
+        # Shuffle so each steps_per_epoch iteration micro_batches are processed in a
+        # different sequence to avoid systematic bias from GA boundary placement.
+        random.shuffle(micro_batches)
 
         # 1. Models to train mode
         self.policy_engine.train()
