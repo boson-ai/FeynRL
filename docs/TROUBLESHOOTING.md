@@ -10,7 +10,7 @@ This guide covers common issues encountered while running FeynRL, including mult
 - **Ray actor crash**: A Ray actor crashed silently (OOM, CUDA error) and the remaining actors are stuck waiting.
 - **NCCL timeout**: Network-level issue between nodes on the training side.
 
-**How to fix:**
+**How to diagnose:**
 1. **Verify GPU budget**:
    ```bash
    python -c "import ray; ray.init(); print(ray.cluster_resources())"
@@ -26,12 +26,7 @@ This guide covers common issues encountered while running FeynRL, including mult
    ```
 4. **Network Connectivity**: Ensure all nodes can communicate over the specified ports.
 
-### Troubleshooting multi-node scaling
-Multi-node training with Ray and DeepSpeed can be complex. If your run hangs:
-1. **GPU Allocation**: Ensure `training_gpus + rollout_gpus` does not exceed your cluster's total GPUs.
-2. **Network Connectivity**: Ensure all nodes can communicate over the specified ports. Use `NCCL_DEBUG=INFO` to surface network-level errors.
-3. **Ray Status**: Check `ray status` to see if any actors have failed or are pending resources.
-4. **Shared Filesystem**: For multi-node runs, ensure your `checkpoint_dir` is on a shared filesystem so all nodes can access saved models.
+5. **Shared Filesystem**: For multi-node runs, ensure your `checkpoint_dir` is on a shared filesystem so all nodes can access saved models.
 
 ---
 
@@ -62,7 +57,7 @@ vLLM is memory-intensive. If you encounter OOM:
 - **Missing Files**: Checkpoint directory is missing `config.json` or tokenizer files; vLLM cannot load a model without them.
 - **Local vs Shared Paths**: On multi-node setups, the checkpoint path is on a local disk that rollout workers on other nodes cannot see.
 
-**How to fix:**
+**How to diagnose:**
 1. **Verify Files**:
    ```bash
    ls <checkpoint_dir>/<experiment_id>/
@@ -72,8 +67,8 @@ vLLM is memory-intensive. If you encounter OOM:
 3. **Sync Check**: If using `weight_sync_method: direct`, disk checkpoints are only written at save intervals; verify the sync logs show success.
 
 ### Direct vs. Disk Weight Synchronization
-- **`direct` (Default)**: Pushes weights directly via GPU memory. It's much faster as it avoids disk I/O, but it's more sensitive to network stability and Ray object store limits.
-- **`disk`**: Saves weights to disk and has vLLM reload them. It's slower but more robust, especially on clusters with high network latency or when troubleshooting sync issues.
+- **`direct` (Default)**: Gathers weights to CPU via DeepSpeed, transfers them through Ray's shared-memory object store to rollout workers, and loads them into vLLM in-place. No disk I/O is involved, making it significantly faster than the disk method.
+- **`disk`**: Saves weights to a checkpoint on disk, and rollout workers reload from the saved path. Slower due to disk I/O but more robust. Also serves as an automatic fallback if direct sync fails.
 
 ---
 
@@ -85,7 +80,7 @@ vLLM is memory-intensive. If you encounter OOM:
 - **Truncation**: Responses are truncated at `rollout.max_tokens` before the model can produce a correct answer, and the terminal reward is lost.
 - **Clipping**: `data.max_seq_len` is too small, so prompt + response gets clipped during training.
 
-**How to fix:**
+**How to diagnose:**
 1. **Inspect Samples**: Look at raw rollout samples to see what the model generates — check `response_len` and whether EOS is present.
 2. **Check Length Limits**:
    - `max_tokens` = max generation length (response only)
