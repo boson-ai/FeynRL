@@ -23,6 +23,7 @@ The `value_forward` method returns `values [B, T-1]` (prediction-aligned, droppi
 - **Tracked metrics**: Policy metrics (`clipfrac`, `approx_kl`, `ent_loss`, `pi_loss`, `pi_loss_total`, `kl_ref`) plus `value_loss_v` (value function MSE loss).
 
 
+**Input:** initial policy parameters $\theta_0$, initial value parameters $\phi_0$, replay shards $\mathcal{B}$ (`micro_batches`)
 
 **Hyperparams:** discount $\gamma$, GAE $\tau$, clip range $(1-\epsilon_\ell,\ 1+\epsilon_h)$, entropy weight $\beta_{\mathrm{ent}}$, KL weight $\beta_{\mathrm{kl}}$
 

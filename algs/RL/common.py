@@ -110,15 +110,6 @@ class COMMON:
             # SGRPO/CISPO has policy only
             print(f"[Alg:{self.alg_name}][Rank {rank}] Model loaded: {self.model_path}")
 
-        # Enable gradient checkpointing on the HF model before DS wrapping
-        if self.gradient_checkpointing:
-            policy_model.gradient_checkpointing_enable()
-            if value_model is not None:
-                value_model.gradient_checkpointing_enable()
-
-            print(f"[Alg:{self.alg_name}][Rank {rank}] Gradient checkpointing enabled"
-                  f"{' (policy + value)' if value_model is not None else ''}")
-
         # Initialize policy engine
         # only pass trainable params so ds doesn't waste memory on frozen ones (e.g. LoRA)
         trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
@@ -145,9 +136,10 @@ class COMMON:
             # Use separate DS config for value model if available (different lr, weight decay, grad clip)
             value_ds_config = self.deepspeed_value_config
             value_ds_dict = value_ds_config.model_dump() if value_ds_config is not None else ds_config_dict
+            trainable_value_params = [p for p in value_model.parameters() if p.requires_grad]
             self.value_engine, self.value_optimizer, _, _ = deepspeed.initialize(
                                                     model=value_model,
-                                                    model_parameters=value_model.parameters(),
+                                                    model_parameters=trainable_value_params,
                                                     config=value_ds_dict
                                                     )
             print(f"[Alg:{self.alg_name}][Rank {rank}] Value model initialized with DeepSpeed")
