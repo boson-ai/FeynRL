@@ -15,7 +15,7 @@
 
 **FeynRL** (pronounced “FineRL”) is a lightweight, modular framework for **post-training and fine-tuning** large models, including supervised fine-tuning (SFT), preference learning (e.g., DPO), and reinforcement learning (e.g., PPO variants). It’s built for researchers and engineers who want a robust, **scalable distributed training stack** without sacrificing readability, hackability, or reproducibility.
 
-### 🔁 Why use FeynRL?
+### 💡 Why use FeynRL?
 
 FeynRL is a good fit if you want to iterate quickly without losing clarity or control.
 
