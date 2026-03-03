@@ -46,7 +46,7 @@ Trajectory generation is powered by **vLLM**, which provides:
 - **Tensor Parallelism**: Capability to shard large models across multiple GPUs for rollout.
 - **Dynamic Loading**: Support for directly updating policy weights during training.
 
-### Weight Synchronization
+### 🔄 Weight Synchronization
 FeynRL supports two methods for syncing weights from the training engine to the rollout workers:
 1. **Direct Sync**: Weights are gathered from training engines and pushed to rollout workers via Ray's shared-memory object store, avoiding disk I/O entirely.
 2. **Disk Sync**: Weights are saved as a checkpoint to disk, and rollout workers reload from the saved path. This also serves as an automatic fallback if direct sync fails.
@@ -57,7 +57,7 @@ FeynRL supports two execution modes that control how rollout generation and trai
 1. **Synchronous**: Each epoch generates rollouts, trains on them, syncs weights, and repeats. Simple, fully "on-policy", and easy to debug. Training and rollout workers are scheduled sequentially on separate GPUs.
 2. **Overlap (async prefetch)**: When enabled, the next epoch's rollouts are scheduled *during* the current training step, running concurrently on separate GPUs. A configurable maximum lag controls how many policy versions the rollout engine can fall behind before a weight sync is forced. This improves GPU utilization by reducing idle time, at the cost of slightly staler rollout data.
 
-## Modularity & Extensibility
+## 🧩 Modularity & Extensibility
 
 - **Algorithm Agnostic**: The system is designed to support various algorithms by providing a common interface for data handling and model updates.
 - **Pluggable Rewards**: Custom reward functions can be easily integrated in the configuration.
