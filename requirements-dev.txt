@@ -5,3 +5,7 @@ hypothesis
 ruff
 pre-commit
 pip-audit
+numpy
+pyyaml
+pydantic
+tqdm
