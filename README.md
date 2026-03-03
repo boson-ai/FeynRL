@@ -13,6 +13,10 @@
 
 ---
 
+## 📢 News
+
+- **[2025-03-03]** 🎉  We're excited to publicly release FeynRL as a preview! Some features and documentation are still evolving. We welcome feedback, bug reports, and contributions as we continue to build this together.
+
 **FeynRL** (pronounced “FineRL”) is a lightweight, modular framework for **post-training and fine-tuning** large models, including supervised fine-tuning (SFT), preference learning (e.g., DPO), and reinforcement learning (e.g., PPO, GRPO). It’s built for researchers and engineers who want a **clean, robust and scalable** distributed training stack without sacrificing readability and hackability.
 
 ### 💡 Why use FeynRL?
