@@ -31,6 +31,7 @@ class VLLMRolloutEngine:
                  eps_reward_norm: float,
                  gpu_memory_utilization: float,
                  model_dtype: str,
+                 max_seq_len: int,
                  engine_id: int = 0,
                  ):
         # Ensure current working directory is in sys.path for this actor
@@ -58,6 +59,8 @@ class VLLMRolloutEngine:
         self.force_strict_on_policy = bool(force_strict_on_policy)
         self.gpu_memory_utilization = float(gpu_memory_utilization)
         self.engine_id = int(engine_id)
+        # prompt + response max length also known as context window size
+        self.max_seq_len = int(max_seq_len)
 
         # vllm engine config
         self.model_path = model_path
@@ -439,6 +442,7 @@ class VLLMRolloutEngine:
                                                 "prompt_ids": prompt_ids, # list[int]
                                                 "response_text": getattr(response, "text", ""),
                                                 "response_len": response_len,
+                                                "truncated": 1 if (prompt_len + response_len) > self.max_seq_len else 0,
                                                     })
                     self.normalize_rewards(samples=group_samples,
                                            stats=group_stats,

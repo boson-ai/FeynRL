@@ -151,6 +151,7 @@ def create_rollout_engines(params, reward_fnc, eos_id):
               "eos_id":eos_id,
               "tensor_parallel_size":tp,
               "model_dtype":params.model.dtype,
+              "max_seq_len":params.data.max_seq_len,
 
               # reward related arguments
               "reward_func":reward_fnc,
@@ -259,7 +260,11 @@ def collect_rollouts(dataloader,
     total_samples_generated = 0
     total_reward_sum = 0.0
     total_response_len = 0
+    min_response_len = float('inf')
+    max_response_len = float('-inf')
     total_tokens = 0
+    total_truncated = 0
+    truncated_ratio = 0.0
 
     # rollout_samples_per_epoch is the number of PROMPTS, not total completions.
     # example: rollout_gpus=2, rollout_batch_size_per_gpu=12, n_samples=3, rollout_samples_per_epoch = 25
@@ -306,7 +311,10 @@ def collect_rollouts(dataloader,
                 total_samples_generated += 1
                 total_reward_sum += sample['pred_rewards'].sum().item()
                 total_response_len += sample['response_len']
+                min_response_len = min(min_response_len, sample['response_len'])
+                max_response_len = max(max_response_len, sample['response_len'])
                 total_tokens += len(sample['prompt_ids']) + len(sample['response_ids'])
+                total_truncated += sample['truncated']
 
         # 5. now add them to replay buffer
         replay_buffer.add_batch_seqs(rollout_merged)
@@ -319,10 +327,13 @@ def collect_rollouts(dataloader,
         logger.warning("No samples generated during rollout phase!")
         avg_reward = 0.0
         avg_response_len = 0.0
-
+        min_response_len = 0.0
+        max_response_len = 0.0
+        truncated_ratio = 0.0
     else:
         avg_reward = total_reward_sum / total_samples_generated
         avg_response_len = total_response_len / total_samples_generated
+        truncated_ratio = total_truncated / total_samples_generated
 
     tps = total_tokens / max(1e-6, rollout_time)
 
@@ -330,6 +341,9 @@ def collect_rollouts(dataloader,
             "avg_reward": avg_reward,
             "total_reward": total_reward_sum,
             "avg_response_len": avg_response_len,
+            "min_response_len": min_response_len,
+            "max_response_len": max_response_len,
+            "truncated_ratio": truncated_ratio,
             "rollout_time": rollout_time,
             "tokens_per_sec": tps}
 
@@ -368,6 +382,10 @@ def finalize_rollouts(all_futures, replay_buffer, logger, rollout_timeout, start
     total_samples_generated = 0
     total_reward_sum = 0.0
     total_response_len = 0
+    min_response_len = float('inf')
+    max_response_len = float('-inf')
+    total_truncated = 0
+    truncated_ratio = 0.0
     total_tokens = 0
 
     for batch_futures in all_futures:
@@ -383,7 +401,10 @@ def finalize_rollouts(all_futures, replay_buffer, logger, rollout_timeout, start
                 total_samples_generated += 1
                 total_reward_sum += sample['pred_rewards'].sum().item()
                 total_response_len += sample['response_len']
+                min_response_len = min(min_response_len, sample['response_len'])
+                max_response_len = max(max_response_len, sample['response_len'])
                 total_tokens += len(sample['prompt_ids']) + len(sample['response_ids'])
+                total_truncated += sample['truncated']
 
         replay_buffer.add_batch_seqs(rollout_merged)
 
@@ -398,9 +419,13 @@ def finalize_rollouts(all_futures, replay_buffer, logger, rollout_timeout, start
     if total_samples_generated == 0:
         avg_reward = 0.0
         avg_response_len = 0.0
+        min_response_len = 0.0
+        max_response_len = 0.0
+        truncated_ratio = 0.0
     else:
         avg_reward = total_reward_sum / total_samples_generated
         avg_response_len = total_response_len / total_samples_generated
+        truncated_ratio = total_truncated / total_samples_generated
 
     tps = total_tokens / max(1e-6, wall_time)
 
@@ -408,6 +433,9 @@ def finalize_rollouts(all_futures, replay_buffer, logger, rollout_timeout, start
             "avg_reward": avg_reward,
             "total_reward": total_reward_sum,
             "avg_response_len": avg_response_len,
+            "min_response_len": min_response_len,
+            "max_response_len": max_response_len,
+            "truncated_ratio": truncated_ratio,
             "rollout_time": wall_time,
             "finalize_wait_time": finalize_time,
             "tokens_per_sec": tps}
@@ -808,6 +836,9 @@ if __name__ == "__main__":
         logger.info(f"[Epoch {epoch + 1}] Rollout complete: {rollout_stats['total_samples_generated']} samples, "
                     f"avg_reward={rollout_stats['avg_reward']:.4f}, total_reward={rollout_stats['total_reward']:.4f}, "
                     f"avg_response_len={rollout_stats['avg_response_len']:.1f}, "
+                    f"min_response_len={rollout_stats['min_response_len']:.1f}, "
+                    f"max_response_len={rollout_stats['max_response_len']:.1f}, "
+                    f"truncated_ratio={rollout_stats['truncated_ratio']:.4f}, "
                     f"{time_str}, tps={rollout_stats['tokens_per_sec']:.2f}")
 
         # Log rollout metrics immediately so they appear in WandB/MLflow
@@ -817,7 +848,10 @@ if __name__ == "__main__":
                 "rollout/avg_reward": rollout_stats['avg_reward'],
                 "rollout/total_reward": rollout_stats['total_reward'],
                 "rollout/avg_response_len": rollout_stats['avg_response_len'],
+                "rollout/min_response_len": rollout_stats['min_response_len'],
+                "rollout/max_response_len": rollout_stats['max_response_len'],
                 "rollout/total_samples": rollout_stats['total_samples_generated'],
+                "rollout/truncated_ratio": rollout_stats['truncated_ratio'],
                 "rollout/rollout_time_sec": rollout_stats['rollout_time'],
                 "rollout/tokens_per_sec": rollout_stats['tokens_per_sec'],
             }
