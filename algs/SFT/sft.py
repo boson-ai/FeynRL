@@ -13,7 +13,7 @@ class SFT:
 
     def compute_loss(self, logits, target_ids, loss_mask):
         '''
-         This implements \sum_{i=1}^{N} log p(y_i|x_i)
+         This implements sum_{i=1}^{N} log p(y_i|x_i)
          target_ids is [B, T -1]
          logits is [B, T -1, vocab_size]
         '''
