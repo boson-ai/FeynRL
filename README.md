@@ -65,7 +65,7 @@ For RL, Ray orchestrates the full training loop: it schedules DeepSpeed training
 
 ## 📢 News
 
-- **[2026-03-03]** 🎉  We're excited to publicly release FeynRL as a preview! Some features and documentation are still evolving. We welcome feedback, bug reports, and contributions as we continue to build this together.
+- ![Date](https://img.shields.io/badge/2026--03--03-purple) 🎉  We're excited to publicly release FeynRL as a preview! Some features and documentation are still evolving. We welcome feedback, bug reports, and contributions as we continue to build this together.
 
 ## How to Use FeynRL
 
