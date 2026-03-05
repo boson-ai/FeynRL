@@ -12,3 +12,4 @@ ray==2.54.0
 mlflow==3.8.1
 wandb==0.25.0
 peft==0.18.1
+math-verify==0.9.0

@@ -9,3 +9,4 @@ numpy
 pyyaml
 pydantic
 tqdm
+math-verify
