@@ -13,7 +13,7 @@ mock_modules = [
     "deepspeed.zero",
     "peft",
     "safetensors",
-    "safetensors.torch"
+    "safetensors.torch",
 ]
 
 for mod in mock_modules:

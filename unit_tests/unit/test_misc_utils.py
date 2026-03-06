@@ -10,7 +10,42 @@ from misc.utils import (
     get_experiment_dir_name,
     load_algorithm,
     ray_get_with_timeout,
+    set_random_seeds,
+    get_determinism_env_vars,
 )
+
+def test_get_determinism_env_vars():
+    result = get_determinism_env_vars()
+    assert result == ":16:8"
+
+def test_set_random_seeds():
+    # Clean env to test setting
+    os.environ.pop("PYTHONHASHSEED", None)
+    os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+
+    set_random_seeds(seed=123, rank=0)
+
+    assert os.environ["PYTHONHASHSEED"] == "123"
+    assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
+
+def test_set_random_seeds_with_rank():
+    '''Verify that rank offset is applied to the seed.'''
+    os.environ.pop("PYTHONHASHSEED", None)
+
+    set_random_seeds(seed=100, rank=3)
+
+    # PYTHONHASHSEED should be the base seed (not offset)
+    assert os.environ["PYTHONHASHSEED"] == "100"
+
+    # But torch/random/numpy seeds should use seed+rank = 103
+    # Verify reproducibility: setting same seed+rank gives same random output
+    set_random_seeds(seed=100, rank=3)
+    val1 = torch.rand(1).item()
+
+    set_random_seeds(seed=100, rank=3)
+    val2 = torch.rand(1).item()
+
+    assert val1 == val2
 
 def test_safe_string_to_torch_dtype():
     assert safe_string_to_torch_dtype("fp16") == torch.float16

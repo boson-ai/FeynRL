@@ -41,6 +41,7 @@ def test_ppo_init_and_engine():
             update_after_full_replay=True,
             deepspeed_config=deepspeed_config,
             gradient_checkpointing=False,
+            seed=42,
             value_model_path="mock/value",
             tau=0.95,
             gamma=0.99

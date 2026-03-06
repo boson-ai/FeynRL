@@ -37,6 +37,7 @@ def test_cispo_init_and_engine():
             update_after_full_replay=True,
             deepspeed_config=deepspeed_config,
             gradient_checkpointing=False,
+            seed=42,
         )
         
         assert cispo.ready is True
