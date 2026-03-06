@@ -1,44 +1,38 @@
-# Adapted from https://github.com/verl-project/verl/blob/d9d94b4da93fbacc06bb546629171c67c0a674aa/verl/utils/reward_score/math_reward.py
-
 import logging
 from typing import Callable, Optional, Sequence, Dict, Any
 import torch
-
 from math_verify.errors import TimeoutException
 from math_verify.grader import verify
 from math_verify.parser import ExprExtractionConfig, ExtractionTarget, LatexExtractionConfig, parse
 from math_verify.utils import timeout
 
+# Adapted from https://github.com/verl-project/verl/blob/d9d94b4da93fbacc06bb546629171c67c0a674aa/verl/utils/reward_score/math_reward.py
+
 logger = logging.getLogger(__name__)
+def math_metric(gold_extraction_target: Sequence[ExtractionTarget] = (ExprExtractionConfig(),),
+                pred_extraction_target: Sequence[ExtractionTarget] = (ExprExtractionConfig(),),
+                aggregation_function: Callable[[list[float]], float] = max,
+                precision: int = 6) -> Callable[[list[str], list[str]], tuple[float, Optional[tuple[list[str], list[str]]]]]:
+    '''
+        Creates a language-aware extractive match metric that extracts answers from the model's output.
+        Known issues:
+        - If the task is to simplify an expression, the metric might overestimate the accuracy. This is because if the model doesn't output any anchor for the extraction (e.g final answer is..),
+            it's possible that the the extracted prediction will be the expression to simplify. Because we do simplifications ourselves, it can thus happen that sympy will correctly simplify the expression,
+            thus it will match gold, despite model not doing anything. PRs to fix this are welcome.
 
+        Args:
+            gold_extraction_target: Sequence[ExtractionTarget]
+                Extraction targets to use for gold answers. Defaults to extracting simple math expressions.
+            pred_extraction_target: Sequence[ExtractionTarget]
+                Extraction targets to use for predictions. Defaults to extracting simple math expressions.
+            aggregation_function: Callable[[list[float]], float]
+                Function to aggregate scores when multiple golds/predictions are present. Defaults to max.
+            precision: int
+                Number of decimal places to use when comparing numerical values. Defaults to 6.
 
-def math_metric(
-    gold_extraction_target: Sequence[ExtractionTarget] = (ExprExtractionConfig(),),
-    pred_extraction_target: Sequence[ExtractionTarget] = (ExprExtractionConfig(),),
-    aggregation_function: Callable[[list[float]], float] = max,
-    precision: int = 6,
-) -> Callable[[list[str], list[str]], tuple[float, Optional[tuple[list[str], list[str]]]]]:
-    """Creates a language-aware extractive match metric that extracts answers from the model's output.
-
-    Known issues:
-    - If the task is to simplify an expression, the metric might overestimate the accuracy. This is because if the model doesn't output any anchor for the extraction (e.g final answer is..),
-        it's possible that the the extracted prediction will be the expression to simplify. Because we do simplifications ourselves, it can thus happen that sympy will correctly simplify the expression,
-        thus it will match gold, despite model not doing anything. PRs to fix this are welcome.
-
-    Args:
-        gold_extraction_target: Sequence[ExtractionTarget]
-            Extraction targets to use for gold answers. Defaults to extracting simple math expressions.
-        pred_extraction_target: Sequence[ExtractionTarget]
-            Extraction targets to use for predictions. Defaults to extracting simple math expressions.
-        aggregation_function: Callable[[list[float]], float]
-            Function to aggregate scores when multiple golds/predictions are present. Defaults to max.
-        precision: int
-            Number of decimal places to use when comparing numerical values. Defaults to 6.
-
-    Returns:
-        A sample level metric that extracts and compares mathematical expressions.
-
-    """
+        Returns:
+            A sample level metric that extracts and compares mathematical expressions.
+    '''
 
     @timeout(30)
     def get_str_preds_with_timeout(extracted_predictions: list[list[str]], extracted_golds: list[list[str]]) -> tuple[list[str], list[str]]:
@@ -70,15 +64,15 @@ def math_metric(
 
 
 def compute_score(prompt_data: Dict[str, Any], response_data: Dict[str, Any], timeout_score: float = 0.0):
-    """
-    input args:
-        prompt_data: Dict[str, Any] - dictionary containing prompt data
-        response_data: Dict[str, Any] - dictionary containing response data
-        timeout_score: float - score to return on timeout
-    output args:
-        r: torch.Tensor - reward tensor
-        is_per_token: bool - whether the reward is per token
-    """
+    '''
+        input args:
+            prompt_data: Dict[str, Any] - dictionary containing prompt data
+            response_data: Dict[str, Any] - dictionary containing response data
+            timeout_score: float - score to return on timeout
+        output args:
+            r: torch.Tensor - reward tensor
+            is_per_token: bool - whether the reward is per token
+    '''
     
     verify_func = math_metric(
         gold_extraction_target=(LatexExtractionConfig(),),
@@ -105,6 +99,7 @@ def compute_score(prompt_data: Dict[str, Any], response_data: Dict[str, Any], ti
         ret_score, _ = verify_func([ground_truth_boxed], [solution_str])
     except TimeoutException:
         ret_score = timeout_score
+
     except Exception as e:
         logger.error(f"Error in math_verify compute_score: {e}")
         ret_score = 0.0
