@@ -7,6 +7,7 @@ import deepspeed
 from peft import get_peft_model, LoraConfig
 from safetensors.torch import save_file
 from misc.utils import set_random_seeds
+import copy
 
 class COMMON:
     '''
@@ -304,15 +305,18 @@ class COMMON:
                 # Auto-derive value output directory if not provided
                 if value_output_dir is None:
                     value_output_dir = output_dir.rstrip('/') + "_value"
-                
+
                 if self.peft_config.use_peft:
                     # Gather one parameter at a time to avoid GPU OOM (same as policy save).
                     raw_sd = self.gather_params_for_save(self.value_engine.module, rank)
                     if rank == 0:
                         os.makedirs(value_output_dir, exist_ok=True)
-                        merged_sd = self.merge_peft_state_dict(raw_sd)
-                        save_file(merged_sd, os.path.join(value_output_dir, "model.safetensors"))
-                        print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT value model")
+                        # Value model params use backbone.* prefix from valueNetwork,
+                        # not base_model.model.* from PeftModel. We need to save raw gathered
+                        # weights without PEFT merge since ValueNetwork already unwrapped
+                        # the PeftModel via get_base_model() at init time.
+                        save_file(raw_sd, os.path.join(value_output_dir, "model.safetensors"))
+                        print(f"[Alg:{self.alg_name}][Rank {rank}] Saved value model weights")
                 else:
                     self.value_engine.save_16bit_model(value_output_dir)
 
@@ -321,10 +325,21 @@ class COMMON:
                     torch.distributed.barrier()
 
                 # 4. Save value config on rank 0 ONLY
+                # The value model is a ValueNetwork (backbone + value_head), NOT a
+                # standard CausalLM. So we need to save its modified config that records this so
+                # users don't accidentally load it with AutoModelForCausalLM.
                 if rank == 0:
                     if hasattr(self.value_engine.module, 'config'):
-                        self.value_engine.module.config.save_pretrained(value_output_dir)
-                        print(f"[Alg:{self.alg_name}][Rank {rank}] Value config saved")
+
+                        value_config = copy.deepcopy(self.value_engine.module.config)
+                        # Override architectures to prevent AutoModelForCausalLM from
+                        # loading weights that have backbone.value_head structure.
+                        value_config.architectures = ["ValueNetwork"]
+                        value_config.auto_map = {}
+                        # Store hidden_size so the value head can be reconstructed.
+                        # hidden_size is already in the config from the base model.
+                        value_config.save_pretrained(value_output_dir)
+                        print(f"[Alg:{self.alg_name}][Rank {rank}] Value config saved (architectures=ValueNetwork)")
 
                     else:
                         print(f"[Alg:{self.alg_name}][Rank {rank}] WARNING: Could not find model config to save for value")
