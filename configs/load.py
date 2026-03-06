@@ -698,6 +698,16 @@ def load_and_verify(method: str, input_yaml: str, experiment_id: str, rank: int,
             if config.run.sync_timeout is None:
                 raise ValueError("run.sync_timeout must be specified for RL training")
 
+            # Overlap mode validation
+            if config.run.overlap_enabled:
+                if config.run.overlap_max_lag is None:
+                    raise ValueError("run.overlap_max_lag must be specified when overlap_enabled=True. "
+                                     "It controls how many training steps ahead the policy can be relative "
+                                     "to the rollout policy version (e.g., overlap_max_lag=1).")
+
+                if config.run.overlap_max_lag < 1:
+                    raise ValueError(f"run.overlap_max_lag must be >= 1, got {config.run.overlap_max_lag}")
+
         # Validate batch_invariant GPU requirements (applies to RL and eval)
         if config.rollout and config.rollout.batch_invariant:
             try:
