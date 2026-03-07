@@ -154,6 +154,7 @@ def create_training_engine(deepspeed_config, deepspeed_ref_config, model, ref_mo
                                                         )
 
     ref_model.eval()
+    ref_model.requires_grad_(False)
     ref_model_engine, _, _, _ = deepspeed.initialize(model=ref_model, config=ds_ref_config_dict)
 
     return model_engine, ref_model_engine, optimizer

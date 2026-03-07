@@ -135,6 +135,7 @@ class COMMON:
         self.ref_model_engine = None
         if ref_model is not None:
             ref_model.eval()
+            ref_model.requires_grad_(False)
             ref_ds_config = self.deepspeed_ref_config.model_dump()
             self.ref_model_engine, _, _, _ = deepspeed.initialize(
                                                     model=ref_model,
