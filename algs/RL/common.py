@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import torch.distributed
 import numpy as np
@@ -6,6 +7,7 @@ from transformers import AutoModelForCausalLM, AutoConfig
 import deepspeed
 from peft import get_peft_model, LoraConfig
 from safetensors.torch import save_file
+from huggingface_hub import split_torch_state_dict_into_shards
 from misc.utils import set_random_seeds
 import copy
 
@@ -276,7 +278,7 @@ class COMMON:
                 if rank == 0:
                     os.makedirs(output_dir, exist_ok=True)
                     merged_sd = self.merge_peft_state_dict(raw_sd)
-                    save_file(merged_sd, os.path.join(output_dir, "model.safetensors"))
+                    self.save_state_dict_sharded(merged_sd, output_dir)
                     print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT policy model")
 
             else:
@@ -315,7 +317,7 @@ class COMMON:
                         # not base_model.model.* from PeftModel. We need to save raw gathered
                         # weights without PEFT merge since ValueNetwork already unwrapped
                         # the PeftModel via get_base_model() at init time.
-                        save_file(raw_sd, os.path.join(value_output_dir, "model.safetensors"))
+                        self.save_state_dict_sharded(raw_sd, value_output_dir)
                         print(f"[Alg:{self.alg_name}][Rank {rank}] Saved value model weights")
                 else:
                     self.value_engine.save_16bit_model(value_output_dir)
@@ -383,6 +385,26 @@ class COMMON:
                     state_dict[name] = param.data.cpu().clone()
 
         return state_dict
+
+    def save_state_dict_sharded(self, state_dict, output_dir, max_shard_size="5GB"):
+        '''
+            Saves a state dict with automatic sharding for large models.
+            For small models that fit in a single shard, saves as model.safetensors.
+            For large models, we split it into model-00001-of-NNNNN.safetensors shards
+            and write model.safetensors.index.json so HF or vllm can load them.
+        '''
+        state_dict_split = split_torch_state_dict_into_shards(state_dict, max_shard_size=max_shard_size)
+
+        for filename, tensor_names in state_dict_split.filename_to_tensors.items():
+            shard = {name: state_dict[name] for name in tensor_names}
+            save_file(shard, os.path.join(output_dir, filename))
+
+        if state_dict_split.is_sharded:
+            index = {"metadata": state_dict_split.metadata,
+                     "weight_map": state_dict_split.tensor_to_filename}
+
+            with open(os.path.join(output_dir, "model.safetensors.index.json"), "w") as f:
+                json.dump(index, f, indent=2)
 
     def merge_peft_state_dict(self, raw_state_dict):
         '''
