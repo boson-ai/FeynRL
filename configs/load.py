@@ -251,6 +251,7 @@ class Rollout(BaseModel):
     rollout_batch_size_per_gpu: int | None = None
     rollout_samples_per_epoch: int | None = None
     batch_invariant: bool = False
+    max_model_len: int = None
 
 class Config(BaseModel):
     '''
