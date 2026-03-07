@@ -209,7 +209,8 @@ def collect_rollouts(dataloader,
         for i, shard in enumerate(rollout_shards):
             rollout_samples.append(rollout_engines[i].generate.remote(prompts=shard,
                                                                       current_iter=epoch,
-                                                                      policy_version=policy_version))
+                                                                      policy_version=policy_version,
+                                                                      log_batch_metrics=True))
 
         # 3. gather rollouts. This is a blocking call means all engines must
         # finish generating rollouts before we can proceed.

@@ -370,7 +370,8 @@ class VLLMRolloutEngine:
     def generate(self,
                 prompts: List[Dict[str, List[int]]],
                 current_iter: int,
-                policy_version: int) -> List[Dict[str, Any]]:
+                policy_version: int,
+                log_batch_metrics: bool = False) -> List[Dict[str, Any]]:
                 ''' 
                     prompts: Data provided by the dataloader. For example:
                         [{'prompt_token_ids': [2,..], 'solution': '1'}, {'prompt_token_ids': [...], 'solution': '2'}, ...]
@@ -551,7 +552,7 @@ class VLLMRolloutEngine:
 
                     rollout_samples.extend(group_samples)
 
-                if batch_num_prompts > 0:
+                if log_batch_metrics and batch_num_prompts > 0:
                     pass_at_k_items = ", ".join(
                         f"avg_pass@{i}={batch_num_passes_at_ks[i] / batch_num_prompts:.4f}"
                         for i in range(1, self.n_samples + 1)
