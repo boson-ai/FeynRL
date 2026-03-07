@@ -33,6 +33,7 @@ class VLLMRolloutEngine:
                  gpu_memory_utilization: float,
                  model_dtype: str,
                  max_seq_len: int,
+                 max_model_len: int | None = None,
                  engine_id: int = 0,
                  batch_invariant: bool = False,
                  ):
@@ -75,6 +76,7 @@ class VLLMRolloutEngine:
         self.batch_invariant = bool(batch_invariant)
         # prompt + response max length also known as context window size
         self.max_seq_len = int(max_seq_len)
+        self.max_model_len = int(max_model_len) if max_model_len is not None else None
 
         # vllm engine config
         self.model_path = model_path
@@ -168,6 +170,8 @@ class VLLMRolloutEngine:
                           # rollout engine separately via ray remote so the weight sync happens at both levels.
                           worker_extension_cls="rollouts.weight_sync.WeightSyncExtension",
                           **llm_extra_kwargs)
+        if self.max_model_len is not None:
+            llm_kwargs["max_model_len"] = self.max_model_len
         try:
             self.vllm_engine = LLM(**llm_kwargs)
             self.log(f"Successfully loaded vllm model from {self.model_path}")
@@ -701,6 +705,7 @@ if __name__ == "__main__":
                                     gpu_memory_utilization=0.5,
                                     engine_id=0,
                                     max_seq_len=2048,
+                                    max_model_len=32768,
                                     model_dtype='bfloat16',
                                     batch_invariant=True,
                                     )
