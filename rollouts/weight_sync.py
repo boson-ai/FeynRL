@@ -33,6 +33,21 @@ class WeightSyncExtension:
             raise TypeError(f"Unsupported weight payload type: {type(serialized_state)}")
 
         num_params = len(state_dict)
+
+        # Sanity-check that state_dict keys have some overlap with model params.
+        # vllm fuses some layers internally (e.g. q_proj + k_proj + v_proj -> qkv_proj,
+        # gate_proj + up_proj -> gate_up_proj), so a strict 1:1 match is not expected.
+        # load_weights handles the remapping, but if zero keys match, the naming
+        # convention is completely wrong and load_weights would silently no-op.
+        model_params = set(name for name, _ in self.model_runner.model.named_parameters())
+        matched = sum(1 for k in state_dict if k in model_params)
+        if matched == 0 and num_params > 0:
+            raise RuntimeError(f"Weight sync failed: none of the {num_params} state_dict keys "
+                               f"matched model parameters. This likely means the naming convention "
+                               f"changed between vllm versions. "
+                               f"Sample state_dict keys: {list(state_dict.keys())[:3]}, "
+                               f"sample model params: {list(model_params)[:3]}")
+
         self.model_runner.model.load_weights(weights=state_dict.items())
         torch.cuda.synchronize()
         return num_params
