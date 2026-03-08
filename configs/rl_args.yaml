@@ -126,7 +126,7 @@ rollout:
   # because it forces batch-invariant kernels.
   # https://docs.vllm.ai/en/stable/examples/offline_inference/reproducibility/
   batch_invariant: False
-
+  max_model_len: null
 
 model:
   name: "google/gemma-3-1b-it"
@@ -160,7 +160,7 @@ data:
   answer_key: "answer"
   # Ground truth for reward calculation.
   solution_key: null
- 
+
 deepspeed:
   zero_optimization:
     # 0:Disabled, 1:OptState, 2:Opt+Grad, 3:Opt+Grad+Param

@@ -161,6 +161,7 @@ All experiments are configured via YAML files validated by Pydantic schemas in `
 | `stop_token_ids` | Token IDs that trigger stop | List of integers | `[]` |
 | `prompt_logprobs` | Return prompt token logprobs (memory intensive) | Boolean | `false` |
 | `batch_invariant` | Force batch-invariant kernels (See [vLLM Reproducibility Doc](https://docs.vllm.ai/en/stable/examples/offline_inference/reproducibility/)) | Boolean | `false` |
+| `max_model_len` | Override maximum context length for vLLM. Useful for models with complex RoPE scaling (e.g. YaRN) where vLLM fails to infer it. Otherwise, leave `null`. | Integer \| `null` | `8192`, `null` |
 
 ---
 
