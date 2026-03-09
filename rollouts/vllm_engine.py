@@ -8,6 +8,7 @@ from typing import Optional, List, Callable, Any, Dict
 import numpy as np
 import pickle
 from misc.utils import set_random_seeds
+from misc.metrics import compute_pass_metrics
 
 @ray.remote
 class VLLMRolloutEngine:
@@ -424,7 +425,7 @@ class VLLMRolloutEngine:
                 batch_reward_std_sum = 0.0
                 for prompt_data, data in zip(prompts, generated_outputs):
                     group_samples = []
-                    group_stats   = {'rewards': [], 'lengths': []}
+                    group_stats   = {'rewards': [], 'lengths': [], 'correct_threshold': []}
                     prompt_ids = list(data.prompt_token_ids or [])
                     prompt_len = len(prompt_ids)
                     if prompt_len == 0:
@@ -455,8 +456,11 @@ class VLLMRolloutEngine:
 
                         # Score every response (including empty) so reward_func can see them,
                         # but only responses > 0 contribute to group stats and normalization.
-                        rewards_resp, is_per_token = self.score_response(prompt_data, response)
+                        rewards_resp, is_per_token, correct_threshold = self.score_response(prompt_data, response)
                         rewards[prompt_len:] = rewards_resp
+                        # correct_threshold must be collected from all responses, including empty
+                        # correct_threshold is required in pass@k calculation
+                        group_stats['correct_threshold'].append(correct_threshold)
 
                         if response_len > 0:
                             # is_per_token is False, then rewards_resp will only have value for the last element
@@ -536,11 +540,15 @@ class VLLMRolloutEngine:
                                            is_per_token=is_per_token)
 
                     # compute pass@k metrics and update related variables
-                    pass_at_k_metrics = self.compute_pass_metrics(group_stats['rewards'])
+                    assert len(set(group_stats['correct_threshold'])) == 1, 'all correct_thresholds should be the same from a reward function'
+                    correct_threshold = group_stats['correct_threshold'][0]
+                    pass_at_k_metrics = compute_pass_metrics(group_stats['rewards'], n_total=self.n_samples,
+                                                             correct_threshold=correct_threshold)
 
                     batch_num_prompts += 1
                     for i in range(1, self.n_samples + 1):
-                        batch_num_passes_at_ks[i] += pass_at_k_metrics['pass_at_ks'][i]
+                        batch_num_passes_at_ks[i] += pass_at_k_metrics['pass_at_ks'].get(i, 0.0)
+
                     batch_num_passes_caret_k += pass_at_k_metrics['pass_caret_k']
                     batch_pass_rate_sum += pass_at_k_metrics['pass_rate']
                     batch_prompt_reward_sum += pass_at_k_metrics['group_mean_reward']
@@ -573,35 +581,6 @@ class VLLMRolloutEngine:
 
                 return rollout_samples
 
-    def compute_pass_metrics(self, rewards: List[float]) -> Dict[str, float]:
-        '''
-            Compute pass@k metrics for a list of rewards.
-            rewards: List of rewards for different responses to the same prompt
-            Returns: Dictionary with pass@k metrics
-        '''
-        k = len(rewards)
-        pass_at_ks = {}
-        for i in range(1, self.n_samples + 1):
-            if k == 0:
-                pass_at_ks[i] = 0.0
-            else:
-                upto = min(i, k)
-                pass_at_ks[i] = float(any(r > 0 for r in rewards[:upto]))
-
-        pass_caret_k = float(all(r > 0 for r in rewards)) if k > 0 else 0.0
-        pass_rate = float(sum(r > 0 for r in rewards) / k) if k > 0 else 0.0
-        group_mean_reward = float(sum(rewards) / k) if k > 0 else 0.0
-        best_of_k_reward = float(max(rewards)) if k > 0 else 0.0
-        reward_std_per_prompt = float(np.std(rewards)) if k > 0 else 0.0
-
-        return {"pass_at_ks": pass_at_ks,
-                "pass_caret_k": pass_caret_k,
-                "pass_rate": pass_rate,
-                "k": k,
-                "group_mean_reward": group_mean_reward,
-                "best_of_k_reward": best_of_k_reward,
-                "reward_std_per_prompt": reward_std_per_prompt}
-
     def score_response(self, prompt: Dict[str, Any], response: Any) -> torch.Tensor:
         '''
             Calculate the reward for each response token.
@@ -609,7 +588,7 @@ class VLLMRolloutEngine:
         '''
         with torch.no_grad():
             # per token rewards or scalar reward
-            rewards, is_per_token = self.reward_func(prompt, response)
+            rewards, is_per_token, correct_threshold = self.reward_func(prompt, response)
 
         if isinstance(rewards, torch.Tensor):
             rewards = rewards.to(dtype=torch.float32, device='cpu')
@@ -620,7 +599,7 @@ class VLLMRolloutEngine:
         if rewards.numel() != len(response.token_ids):
             raise ValueError(f"score_response must return len={len(response.token_ids)} rewards, got {rewards.numel()}")
 
-        return rewards, is_per_token
+        return rewards, is_per_token, correct_threshold
 
     def normalize_rewards(self,
                           samples: List[Dict[str, Any]],
@@ -675,16 +654,17 @@ if __name__ == "__main__":
 
     def default_reward_func(prompt, response):
         is_per_token = False
+        correct_threshold = 0.0
         response_ids = response.token_ids
         finish_reason = getattr(response, "finish_reason", None)
         r = torch.zeros((len(response_ids),), dtype=torch.float32)
 
         if len(response_ids) == 0:
-            return r, is_per_token
+            return r, is_per_token, correct_threshold
 
         r[-1] = 1.0 if str(finish_reason) == "stop" else 0.0
 
-        return r, is_per_token
+        return r, is_per_token, correct_threshold
 
     vllm = VLLMRolloutEngine.remote(model_path='google/gemma-3-1b-it',
                                     trust_remote_code=True,
@@ -725,7 +705,7 @@ if __name__ == "__main__":
                                         return_tensors=None,
                                         )
         samples_ids.append({"prompt_token_ids": prompt_ids})
-    output_ref = vllm.generate.remote(samples_ids, 1, 0)
+    output_ref = vllm.generate.remote(prompts=samples_ids, current_iter=1, policy_version=0, log_batch_metrics=True)
     output = ray.get(output_ref)
     print(output)
     print('Done')

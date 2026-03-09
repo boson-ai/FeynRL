@@ -9,6 +9,7 @@ from math_verify.utils import timeout
 # Adapted from https://github.com/verl-project/verl/blob/d9d94b4da93fbacc06bb546629171c67c0a674aa/verl/utils/reward_score/math_reward.py
 
 logger = logging.getLogger(__name__)
+
 def math_metric(gold_extraction_target: Sequence[ExtractionTarget] = (ExprExtractionConfig(),),
                 pred_extraction_target: Sequence[ExtractionTarget] = (ExprExtractionConfig(),),
                 aggregation_function: Callable[[list[float]], float] = max,
@@ -65,15 +66,18 @@ def math_metric(gold_extraction_target: Sequence[ExtractionTarget] = (ExprExtrac
 
 def compute_score(prompt_data: Dict[str, Any], response_data: Dict[str, Any], timeout_score: float = 0.0):
     '''
-        input args:
-            prompt_data: Dict[str, Any] - dictionary containing prompt data
-            response_data: Dict[str, Any] - dictionary containing response data
-            timeout_score: float - score to return on timeout
-        output args:
-            r: torch.Tensor - reward tensor
-            is_per_token: bool - whether the reward is per token
+      input args:
+        prompt_data: Dict[str, Any]
+        response_data: Dict[str, Any]
+        timeout_score: score to return on timeout
+      output args:
+        r: torch.Tensor of length of response token ids
+        is_per_token: whether the reward is per token
+        correct_threshold: a response is counted as correct for pass@k
+            when its scalar reward strictly exceeds this threshold. For example, for binary
+            reward functions [0,1], this threshold is 0.0.
     '''
-    
+
     verify_func = math_metric(
         gold_extraction_target=(LatexExtractionConfig(),),
         pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
@@ -81,13 +85,14 @@ def compute_score(prompt_data: Dict[str, Any], response_data: Dict[str, Any], ti
     
     solution_str = response_data.text
     ground_truth = prompt_data["solution"]
+    correct_threshold = 0.0
     
     # GSM8K style reward returns a tensor of same length as response token IDs
     r = torch.zeros((len(response_data.token_ids),), dtype=torch.float32)
     is_per_token = False
     
     if len(response_data.token_ids) == 0:
-        return r, is_per_token
+        return r, is_per_token, correct_threshold
 
     # Wrap the ground truth in \boxed{} format for verification if it's not already
     ground_truth_boxed = ground_truth
@@ -105,4 +110,4 @@ def compute_score(prompt_data: Dict[str, Any], response_data: Dict[str, Any], ti
         ret_score = 0.0
 
     r[-1] = float(ret_score)
-    return r, is_per_token
+    return r, is_per_token, correct_threshold
