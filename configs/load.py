@@ -492,6 +492,14 @@ class Config(BaseModel):
             v_clip = self.train.value_clip_grad_norm if self.train.value_clip_grad_norm is not None else self.train.clip_grad_norm
             value_ds.gradient_clipping = float(v_clip)
 
+            # in case value_lr, value_weight_decay, value_clip_grad_norm were empty
+            # set them to the policy's lr, weight_decay, clip_grad_norm
+            print(f"[Config] value_lr: {v_lr}, value_weight_decay: {v_wd}, value_clip_grad_norm: {v_clip}")
+            print(f"[Config] policy_lr: {self.train.lr}, policy_weight_decay: {self.train.weight_decay}, policy_clip_grad_norm: {self.train.clip_grad_norm}")
+            self.train.value_lr = v_lr
+            self.train.value_weight_decay = v_wd
+            self.train.value_clip_grad_norm = v_clip
+
             self.deepspeed_value = value_ds
 
 def load_and_verify(method: str, input_yaml: str, experiment_id: str, rank: int, world_size: int | None = None):
