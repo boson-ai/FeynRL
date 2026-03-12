@@ -10,13 +10,14 @@ from safetensors.torch import save_file
 from huggingface_hub import split_torch_state_dict_into_shards
 from misc.utils import set_random_seeds
 import copy
+import random
 
 class COMMON:
     '''
         This class provides common functions for policy gradient algorithms.
         Only contains methods that are 100% identical across all PG algorithms.
     '''
-    def _load_single_model(self, model_path: str, dtype: torch.dtype, model_name: str):
+    def load_single_model(self, model_path: str, dtype: torch.dtype, model_name: str):
         '''
             Helper to load a single model from HuggingFace.
         '''
@@ -34,9 +35,9 @@ class COMMON:
                             )
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
-        # apply PEFT module if enabled
+        # apply PEFT module to both policy and value
         if model_name != "ref" and self.peft_config.use_peft:
-            model = self._apply_peft_module(model)
+            model = self.apply_peft_module(model)
             if rank == 0:
                 print(f"[Alg:{self.alg_name}][Rank {rank}] PEFT module applied for {model_name}")
                 model.print_trainable_parameters()
@@ -47,7 +48,8 @@ class COMMON:
             assert num_trainable > 0, "PEFT produced zero trainable parameters. Check peft.lora_target_modules"
 
         # Enable gradient checkpointing on the HF model before DS wrapping
-        if model_name != "ref" and self.gradient_checkpointing:
+        # only for policy as value model is done in ppo.load_model()
+        if model_name == "policy" and self.gradient_checkpointing:
             model.gradient_checkpointing_enable()
             print(f"[Alg:{self.alg_name}][Rank {rank}] Gradient checkpointing enabled for {model_name}")
 
@@ -64,7 +66,7 @@ class COMMON:
 
         return model
 
-    def _apply_peft_module(self, model):
+    def apply_peft_module(self, model):
         '''
             Apply PEFT module to the model if it is enabled.
         '''
@@ -260,37 +262,55 @@ class COMMON:
             Args:
                 output_dir: Directory to save policy model
                 tag: Checkpoint tag/identifier
-                value_output_dir: Optional directory to save value model (whenever we meed value function). 
+                value_output_dir: Optional directory to save value model (whenever we need value function).
                                   If None and value model exists, defaults to {output_dir}_value.
             Note we must call this on ALL ranks for zero-3 correctness.
         '''
-        rank = torch.distributed.get_rank()
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         print(f"[Alg:{self.alg_name}][Rank {rank}] Saving checkpoint with tag {tag}...")
 
-        try:
-            # 1. Save policy model weights (gathered fp16/bf16)
-            if self.peft_config.use_peft:
-                # Save full merged model (base + LoRA merged) so vllm can load it
-                # directly for disk-based refresh. Must gather ALL params (base + adapter)
-                # since ZeRO-3 partitions everything, not just trainable params.
-                # Gather one parameter at a time to avoid gpu OOM as gathering all at once
-                # would temporarily materialize the entire model on every gpu.
-                raw_sd = self.gather_params_for_save(self.policy_engine.module, rank)
+        # 1. Policy weights
+        if self.peft_config.use_peft:
+            # Save full merged model (base + LoRA merged) so vllm can load it
+            # directly for disk-based refresh. Must gather ALL params, base + adapter,
+            # since ZeRO-3 partitions everything, not just trainable params.
+            # Gather one parameter at a time to avoid gpu OOM as gathering all at once
+            # would temporarily materialize the entire model on every gpu.
+            raw_sd = self.gather_params_for_save(self.policy_engine.module, rank)
+            status = True
+            try:
                 if rank == 0:
                     os.makedirs(output_dir, exist_ok=True)
                     merged_sd = self.merge_peft_state_dict(raw_sd)
                     self.save_state_dict_sharded(merged_sd, output_dir)
                     print(f"[Alg:{self.alg_name}][Rank {rank}] Saved merged PEFT policy model")
 
-            else:
-                self.policy_engine.save_16bit_model(output_dir)
+            except Exception as e:
+                status = False
+                print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving PEFT policy weights: {e}")
 
-            # Barrier to ensure all ranks finished writing before rank 0 saves config
-            # Without this, rank 0 might save config before other ranks write their shards
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
+            self.barrier_with_error_check(status)
 
-            # 2. Save policy config (required for vllm) on rank 0 ONLY
+        else:
+            # Gather non-PEFT weights and save as sharded safetensors, hf-compatible.
+            # Uses the same gather + save path as PEFT for consistent output format.
+            raw_sd = self.gather_params_for_save(self.policy_engine.module, rank)
+            status = True
+            try:
+                if rank == 0:
+                    os.makedirs(output_dir, exist_ok=True)
+                    self.save_state_dict_sharded(raw_sd, output_dir)
+                    print(f"[Alg:{self.alg_name}][Rank {rank}] Saved non-PEFT policy model")
+
+            except Exception as e:
+                status = False
+                print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving non-PEFT policy weights: {e}")
+
+            self.barrier_with_error_check(status)
+
+        # 2. Policy config for rank 0 only. this is required for vllm
+        status = True
+        try:
             if rank == 0:
                 if hasattr(self.policy_engine.module, 'config'):
                     self.policy_engine.module.config.save_pretrained(output_dir)
@@ -299,19 +319,28 @@ class COMMON:
                 else:
                     print(f"[Alg:{self.alg_name}][Rank {rank}] WARNING: Could not find model config to save for policy")
 
-            # Make sure rank 0 finished writing policy config
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
+                # Save generation_config.json if available. This is needed by some hf pipelines or vllm.
+                gen_cfg = getattr(self.policy_engine.module, 'generation_config', None)
+                if gen_cfg is not None:
+                    gen_cfg.save_pretrained(output_dir)
+                    print(f"[Alg:{self.alg_name}][Rank {rank}] Generation config saved")
 
-            # 3. Save value model if provided
-            if hasattr(self, 'value_engine') and self.value_engine is not None:
-                # Auto-derive value output directory if not provided
-                if value_output_dir is None:
-                    value_output_dir = output_dir.rstrip('/') + "_value"
+        except Exception as e:
+            status = False
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving policy config: {e}")
 
-                if self.peft_config.use_peft:
-                    # Gather one parameter at a time to avoid GPU OOM (same as policy save).
-                    raw_sd = self.gather_params_for_save(self.value_engine.module, rank)
+        self.barrier_with_error_check(status)
+
+        # 3. Value model weights
+        if hasattr(self, 'value_engine') and self.value_engine is not None:
+            if value_output_dir is None:
+                value_output_dir = output_dir.rstrip('/') + "_value"
+
+            if self.peft_config.use_peft:
+                # Gather one parameter at a time to avoid gpu OOM (same as policy save).
+                raw_sd = self.gather_params_for_save(self.value_engine.module, rank)
+                status = True
+                try:
                     if rank == 0:
                         os.makedirs(value_output_dir, exist_ok=True)
                         # Value model params use backbone.* prefix from valueNetwork,
@@ -319,46 +348,70 @@ class COMMON:
                         # weights without PEFT merge since ValueNetwork already unwrapped
                         # the PeftModel via get_base_model() at init time.
                         self.save_state_dict_sharded(raw_sd, value_output_dir)
-                        print(f"[Alg:{self.alg_name}][Rank {rank}] Saved value model weights")
-                else:
-                    self.value_engine.save_16bit_model(value_output_dir)
 
-                # Barrier to ensure all ranks finished writing before rank 0 saves config
-                if torch.distributed.is_initialized():
-                    torch.distributed.barrier()
+                        # Save the PEFT config so the value checkpoint is reloadable.
+                        # LoRA injected parameter names (e.g. backbone.model.layers.0.self_attn.q_proj.lora_A.default.weight)
+                        # cannot be loaded without knowing the exact PEFT wrapping used. So the following is to fix that:
+                        peft_cfg = {"peft_type": self.peft_config.peft_type,
+                                    "lora_rank": self.peft_config.lora_rank,
+                                    "lora_alpha": self.peft_config.lora_alpha,
+                                    "lora_dropout": self.peft_config.lora_dropout,
+                                    "lora_target_modules": self.peft_config.lora_target_modules,
+                                    "task_type": self.peft_config.task_type,
+                                    "is_value_model": True,
+                                   }
+                        with open(os.path.join(value_output_dir, "peft_config.json"), "w") as f:
+                            json.dump(peft_cfg, f, indent=2)
+                        print(f"[Alg:{self.alg_name}][Rank {rank}] Saved value model weights + peft_config.json")
 
-                # 4. Save value config on rank 0 ONLY
-                # The value model is a ValueNetwork (backbone + value_head), NOT a
-                # standard CausalLM. So we need to save its modified config that records this so
-                # users don't accidentally load it with AutoModelForCausalLM.
+                except Exception as e:
+                    status = False
+                    print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving value model weights: {e}")
+
+                self.barrier_with_error_check(status)
+            else:
+                # Gather non-PEFT value weights and save as sharded safetensors.
+                raw_sd = self.gather_params_for_save(self.value_engine.module, rank)
+                status = True
+                try:
+                    if rank == 0:
+                        os.makedirs(value_output_dir, exist_ok=True)
+                        self.save_state_dict_sharded(raw_sd, value_output_dir)
+                        print(f"[Alg:{self.alg_name}][Rank {rank}] Saved non-PEFT value model")
+
+                except Exception as e:
+                    status = False
+                    print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving non-PEFT value weights: {e}")
+
+                self.barrier_with_error_check(status)
+
+            # 4. Value config for rank 0 only
+            # The value model is a ValueNetwork (backbone + value_head), NOT a
+            # standard CausalLM. So we need to save its modified config that records this so
+            # users don't accidentally load it with AutoModelForCausalLM.
+            status = True
+            try:
                 if rank == 0:
                     if hasattr(self.value_engine.module, 'config'):
-
                         value_config = copy.deepcopy(self.value_engine.module.config)
                         # Override architectures to prevent AutoModelForCausalLM from
                         # loading weights that have backbone.value_head structure.
                         value_config.architectures = ["ValueNetwork"]
                         value_config.auto_map = {}
-                        # Store hidden_size so the value head can be reconstructed.
-                        # hidden_size is already in the config from the base model.
+                        # hidden_size is already present in the base model config.
                         value_config.save_pretrained(value_output_dir)
                         print(f"[Alg:{self.alg_name}][Rank {rank}] Value config saved (architectures=ValueNetwork)")
 
                     else:
                         print(f"[Alg:{self.alg_name}][Rank {rank}] WARNING: Could not find model config to save for value")
 
-                # Make sure rank 0 finished writing value config
-                if torch.distributed.is_initialized():
-                    torch.distributed.barrier()
+            except Exception as e:
+                status = False
+                print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving value config: {e}")
 
-            print(f"[Alg:{self.alg_name}][Rank {rank}] Checkpoint save completed!")
+            self.barrier_with_error_check(status)
 
-        except Exception as e:
-            # The normal path has multiple barriers and we cannot know which one failed,
-            # so adding one here would cause a barrier count mismatch and deadlock.
-            # Instead, we let the error propagate and ray.get catches it and kills other actors.
-            print(f"[Alg:{self.alg_name}][Rank {rank}] Error saving checkpoint: {e}")
-            raise
+        print(f"[Alg:{self.alg_name}][Rank {rank}] Checkpoint save completed!")
 
     def gather_params_for_save(self, module, rank):
         '''
@@ -372,9 +425,13 @@ class COMMON:
             params.append(param)
             names.append(name)
 
-        is_zero3 = hasattr(params[0], 'ds_id') if params else False
+        is_zero3 = any(hasattr(p, 'ds_id') for p in params) if params else False
         state_dict = {}
 
+        # Before GatheredParameters:
+        # param.data -> tensor([], device=cuda:N), only the local shard is present
+        # During GatheredParameters:
+        # param.data -> full tensor([...shape...]), all ranks all-gathered
         if is_zero3:
             for name, param in zip(names, params):
                 with deepspeed.zero.GatheredParameters([param], modifier_rank=0):
@@ -491,7 +548,7 @@ class COMMON:
             Returns:
                 dict: {param_name: cpu_tensor} on rank 0, empty dict on other ranks.
         '''
-        rank = torch.distributed.get_rank()
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
         # gather_params_for_save handles ZeRO-3 collective gathering and works
         # for all DS stages. Must be called on ALL ranks.
@@ -503,10 +560,115 @@ class COMMON:
         # however, vllm expects original names like model.layers.0.self_attn.q_proj.weight.
         # So load_weights() won't recognize any of these and the sync silently fails. To fix this,
         # we merge LoRA weights into base model weights and remap to original HF names so vllm can load them.
+        ok = True
         if rank == 0 and self.peft_config.use_peft:
-            state_dict = self.merge_peft_state_dict(state_dict)
+            try:
+                state_dict = self.merge_peft_state_dict(state_dict)
+            except Exception as e:
+                ok = False
+                print(f"[Alg:{self.alg_name}][Rank {rank}] Error merging PEFT state_dict: {e}")
+
+        # Synchronize to ensure no rank continues until Rank 0 finishes cpu processing.
+        # Use barrier_with_error_check so any merge failure on rank 0 propagates
+        # immediately instead of hanging other ranks at a plain barrier.
+        self.barrier_with_error_check(ok)
 
         if rank == 0:
             print(f"[Alg:{self.alg_name}][Rank {rank}] Gathered state_dict (peft={self.peft_config.use_peft})!")
 
         return state_dict
+
+    def barrier_with_error_check(self, succeeded: bool):
+        '''
+            Synchronized barrier that propagates failures across ranks.
+            Unlike torch.distributed.barrier(), if any rank fails (e.g. disk full,
+            permission error during save), all ranks detect the failure and raise
+            immediately instead of hanging until NCCL timeout. Each rank publishes a 0/1 flag
+            via all_reduce(MIN). If any rank failed, the reduced flag is 0 and every rank raises.
+            In single-process mode, raises directly on failure.
+        '''
+        if not torch.distributed.is_initialized():
+            if not succeeded:
+                raise RuntimeError(f"[Alg:{self.alg_name}] Checkpoint operation failed on this process")
+
+            return
+
+        flag = torch.tensor([1 if succeeded else 0], dtype=torch.int32, device=self.policy_engine.device)
+        torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MIN)
+
+        if flag.item() == 0:
+            raise RuntimeError(f"[Alg:{self.alg_name}] Checkpoint operation failed on at least one rank "
+                               f"(this is rank {torch.distributed.get_rank()}), all ranks aborting "
+                                f"to prevent deadlock")
+
+    def save_engine_state(self, engine_state_dir):
+        '''
+            Save deepspeed engine state such as optimizer, LR scheduler for training resume.
+            Uses DS native save_checkpoint which handles ZeRO partition persistence
+            so each rank saves its own optimizer shard. Must be called on ALL ranks.
+            RNG states are stored in client_state so each rank preserves its own
+            Python/NumPy/PyTorch/CUDA random generator state.
+        '''
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+
+        client_state = {'rng_python': random.getstate(),
+                        'rng_numpy': np.random.get_state(),
+                        'rng_torch_cpu': torch.random.get_rng_state(),
+                        # Preserve _train_step_calls for reproducible micro-batch shuffling on resume
+                        '_train_step_calls': getattr(self, '_train_step_calls', 0),}
+
+        if torch.cuda.is_available():
+            client_state['rng_torch_cuda'] = torch.cuda.get_rng_state()
+
+        self.policy_engine.save_checkpoint(engine_state_dir, tag="policy", client_state=client_state)
+        print(f"[Alg:{self.alg_name}][Rank {rank}] Saved policy engine state")
+
+        if hasattr(self, 'value_engine') and self.value_engine is not None:
+            self.value_engine.save_checkpoint(engine_state_dir, tag="value")
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Saved value engine state")
+
+    def load_engine_state(self, engine_state_dir):
+        '''
+            Load DeepSpeed engine state: model weights, optimizer, and lr scheduler
+            from a previous checkpoint for training resume. Must be called on ALL ranks after init_training_engine().
+            Returns client_state dict (contains RNG states) or empty dict.
+        '''
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+
+        load_path, client_state = self.policy_engine.load_checkpoint(engine_state_dir, tag="policy")
+
+        if load_path is None:
+            raise FileNotFoundError(f"[Alg:{self.alg_name}][Rank {rank}] DeepSpeed failed to load policy checkpoint "
+                                    f"from {engine_state_dir}/policy. load_checkpoint returned (None, None) — "
+                                    f"directory may be missing or corrupt.")
+
+        print(f"[Alg:{self.alg_name}][Rank {rank}] Loaded policy engine state from {load_path}")
+
+        if hasattr(self, 'value_engine') and self.value_engine is not None:
+            value_load_path, _ = self.value_engine.load_checkpoint(engine_state_dir, tag="value")
+            if value_load_path is None:
+                raise FileNotFoundError(f"[Alg:{self.alg_name}][Rank {rank}] DeepSpeed failed to load value checkpoint "
+                                        f"from {engine_state_dir}/value. load_checkpoint returned (None, None) — "
+                                        f"directory may be missing or corrupt.")
+
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Loaded value engine state from {value_load_path}")
+
+        # Restore per-rank rng states and train_step_calls counter
+        if client_state:
+            if 'rng_python' in client_state:
+                random.setstate(client_state['rng_python'])
+
+            if 'rng_numpy' in client_state:
+                np.random.set_state(client_state['rng_numpy'])
+
+            if 'rng_torch_cpu' in client_state:
+                torch.random.set_rng_state(client_state['rng_torch_cpu'])
+
+            if 'rng_torch_cuda' in client_state and torch.cuda.is_available():
+                torch.cuda.set_rng_state(client_state['rng_torch_cuda'])
+
+            if '_train_step_calls' in client_state:
+                self._train_step_calls = client_state['_train_step_calls']
+            print(f"[Alg:{self.alg_name}][Rank {rank}] Restored RNG states")
+
+        return client_state or {}
