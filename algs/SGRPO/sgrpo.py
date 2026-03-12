@@ -6,7 +6,7 @@ import ray
 import random
 
 # load follwoings from common.py:
-# _load_single_model, init_training_engine, policy_forward,
+# load_single_model, init_training_engine, policy_forward,
 # ref_forward, compute_kl_distance, save_checkpoint
 from algs.RL.common import COMMON
 
@@ -75,11 +75,11 @@ class SGRPO(COMMON):
             Load policy and reference models from huggingface.
         '''
         # Load policy model
-        model = self._load_single_model(model_path=self.model_path, dtype=self.model_dtype, model_name="policy")
+        model = self.load_single_model(model_path=self.model_path, dtype=self.model_dtype, model_name="policy")
 
         # Load reference model if provided
         if self.ref_model_path and self.kl_coeff > 0.0:
-            ref_model = self._load_single_model(model_path=self.ref_model_path, dtype=self.model_dtype, model_name="ref")
+            ref_model = self.load_single_model(model_path=self.ref_model_path, dtype=self.model_dtype, model_name="ref")
         else:
             ref_model = None
 
