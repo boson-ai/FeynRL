@@ -8,7 +8,7 @@ import random
 
 # Since the following functions are the same for all algorithms
 # we load them from common.py:
-# _load_single_model, init_training_engine,policy_forward,
+# load_single_model, init_training_engine,policy_forward,
 # ref_forward, compute_kl_distance, save_checkpoint
 from algs.RL.common import COMMON
 from algs.PPO.value_net import ValueNetwork
@@ -91,18 +91,34 @@ class PPO(COMMON):
             Value model has a scalar value head.
         '''
         # Load policy model
-        policy_model = self._load_single_model(model_path=self.model_path, dtype=self.model_dtype, model_name="policy")
+        policy_model = self.load_single_model(model_path=self.model_path, dtype=self.model_dtype, model_name="policy")
 
         # Load reference model if provided
         if self.ref_model_path and self.kl_coeff > 0.0:
-            ref_model = self._load_single_model(model_path=self.ref_model_path, dtype=self.model_dtype, model_name="ref")
+            ref_model = self.load_single_model(model_path=self.ref_model_path, dtype=self.model_dtype, model_name="ref")
+
         else:
             ref_model = None
 
         # Load value model
-        # we assume the value model has the same dtype as the policy model
-        base_value_model = self._load_single_model(model_path=self.value_model_path, dtype=self.model_dtype, model_name="value")
+        # we assume the value model has the same dtype as the policy model.
+        base_value_model = self.load_single_model(model_path=self.value_model_path, dtype=self.model_dtype, model_name="value_base")
         value_model = ValueNetwork(base_value_model)
+
+        # Apply gradient checkpointing and PEFT input_require_grads directly to the
+        # ValueNetwork backbone. load_single_model skips this because ValueNetwork(PeftModel).get_base_model()
+        # unwraps the PeftModel, which may drop hooks added by gradient_checkpointing_enable()
+        # and enable_input_require_grads(). Doing it here ensures the actual backbone used in forward/backward has them.
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        if self.gradient_checkpointing:
+            value_model.gradient_checkpointing_enable()
+            if rank == 0:
+                print(f"[Alg:{self.alg_name}][Rank {rank}] Gradient checkpointing enabled for value model")
+
+            if self.peft_config.use_peft and self.peft_config.peft_type == "lora":
+                value_model.enable_input_require_grads()
+                if rank == 0:
+                    print(f"[Alg:{self.alg_name}][Rank {rank}] enable_input_require_grads() for value model")
 
         return {"policy_model": policy_model, "ref_model": ref_model, "value_model": value_model}
 
@@ -218,13 +234,9 @@ class PPO(COMMON):
 
         # 1. make sure advantages are detached and
         # convert to float32 for stability under bf16/fp16
+        # Advantages are already normalized across the full batch in precompute_gae.
         adv = advantages.detach().to(torch.float32)
         mask_bool = (mask.to(device=device) > 0.5)
-
-        # normalize advs to have mean=0 and var=1
-        if mask_bool.any():
-            valid_adv = adv[mask_bool]
-            adv = (adv - valid_adv.mean()) / (valid_adv.std(unbiased=False) + 1e-8)
 
         mask = mask_bool.to(dtype=dtype)
         denom = mask.sum().clamp(min=1.0)
@@ -342,14 +354,15 @@ class PPO(COMMON):
 
         return loss, metrics
 
-    def precompute_gae(self, micro_batches):
+    def calculate_gae(self, micro_batches):
         '''
             Precompute values and gae for all batches before any updates.
             Returns list of (returns, advs) tuples on cpu, one per batch.
         '''
         device = self.value_engine.device
         self.value_engine.eval()
-        precomputed = []
+        unnormalized_data = []
+        all_valid_advs = []
         with torch.no_grad():
             for mb in micro_batches:
                 ids  = mb['input_ids'].to(device, non_blocking=True)
@@ -366,8 +379,23 @@ class PPO(COMMON):
                                                      done=done,
                                                      mask=mask,
                                                      last_val=last_v)
-                precomputed.append((rets.cpu(), advs.cpu()))
-        return precomputed
+                mask_bool = (mask.to(device=device) > 0.5)
+                if mask_bool.any():
+                    all_valid_advs.append(advs[mask_bool].cpu())
+                unnormalized_data.append((rets.cpu(), advs.cpu()))
+
+        # Normalize advantages across the full batch in the current rank
+        if len(all_valid_advs) > 0:
+            all_valid_advs = torch.cat(all_valid_advs)
+            mean = all_valid_advs.mean()
+            std = all_valid_advs.std(unbiased=False) + 1e-8
+            normalized_data = []
+            for rets, advs in unnormalized_data:
+                normalized_data.append((rets, (advs - mean) / std))
+            return normalized_data
+
+        else:
+            return unnormalized_data
 
     def train_step(self, engine_id, micro_batches):
         '''
@@ -382,7 +410,7 @@ class PPO(COMMON):
             "ranks via prepare_training_batches padding"
 
         # 1. Pre-compute values and GAE before any updates.
-        precomputed_gae = self.precompute_gae(micro_batches)
+        precomputed_gae = self.calculate_gae(micro_batches)
 
         device = self.policy_engine.device
 
@@ -401,7 +429,12 @@ class PPO(COMMON):
 
         # Shuffle so each steps_per_epoch iteration micro_batches are processed in a
         # different sequence to avoid systematic bias from GA boundary placement.
-        random.shuffle(paired)
+        # Use a local RNG seeded deterministically so the shuffle is reproducible
+        # across runs regardless of how many times train_step has been called.
+        call_idx = getattr(self, '_train_step_calls', 0)
+        self._train_step_calls = call_idx + 1
+        local_rng = random.Random(self.seed + engine_id + call_idx)
+        local_rng.shuffle(paired)
 
         # torch.distributed.get_rank() would be the same thing as engine_id
         if engine_id == 0:
