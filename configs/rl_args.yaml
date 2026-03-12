@@ -1,5 +1,4 @@
 run:
-  experiment_id: "dummyrun_rl_1"
   project_name: "rasool-exp"
   logger_type : "mlflow" # mlflow or wandb
   tracking_uri: "" # e.g. "http://mymlflow.com:1234/"

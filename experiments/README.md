@@ -24,7 +24,7 @@ Once your data is prepared, update the **`data`** section in the relevant config
 `main_sl.py` is the entry point for supervised learning experiments.
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 main_sl.py --config-file ./configs/sl_args.yaml --experiment_id myexp1
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 main_sl.py --config_file ./configs/sl_args.yaml --experiment_id myexp1
 ```
 
 **Notes**
@@ -47,7 +47,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 main_sl.py --config-fil
 `main_cl.py` is the entry point for contrastive/preference learning experiments (e.g., DPO).
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2 torchrun --nproc_per_node=3 main_cl.py --config-file ./configs/cl_args.yaml --experiment_id myexp2
+CUDA_VISIBLE_DEVICES=0,1,2 torchrun --nproc_per_node=3 main_cl.py --config_file ./configs/cl_args.yaml --experiment_id myexp2
 ```
 
 **Notes**
@@ -63,7 +63,7 @@ RL runs are more involved because they use **Ray** to orchestrate DeepSpeed **tr
 `main_rl.py` is the entry point for RL experiments (e.g., PPO, SGRPO, CISPO, etc.).
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3,4 python main_rl.py --config-file ./configs/rl_args.yaml --experiment_id exp3
+CUDA_VISIBLE_DEVICES=0,1,2,3,4 python main_rl.py --config_file ./configs/rl_args.yaml --experiment_id exp3
 ```
 
 **Key differences vs SFT/CL**
@@ -139,7 +139,7 @@ In `./configs/rl_args.yaml`:
 On **Node A**:
 
 ```bash
-python main_rl.py --config-file ./configs/rl_args.yaml --experiment_id exp4
+python main_rl.py --config_file ./configs/rl_args.yaml --experiment_id exp4
 ```
 
 **Important**

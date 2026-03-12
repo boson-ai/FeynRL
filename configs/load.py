@@ -516,6 +516,8 @@ def load_and_verify(method: str, input_yaml: str, experiment_id: str, rank: int,
         with open(input_yaml, "r") as f:
             raw_config = yaml.safe_load(f)
 
+        assert experiment_id, "experiment_id is required"
+        raw_config["run"]["experiment_id"] = experiment_id
         # now verify the config
         config = Config(**raw_config)
 
@@ -527,8 +529,6 @@ def load_and_verify(method: str, input_yaml: str, experiment_id: str, rank: int,
             config.model.value_model = None
 
         config.run.method = method
-        # Update Run details
-        config.run.experiment_id = experiment_id
 
         # Common pre-training checks
         if method != "eval":

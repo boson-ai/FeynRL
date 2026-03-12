@@ -1,10 +1,12 @@
 run:
-  experiment_id: "dummyrun_rl_1"
   project_name: "rasool-exp"
   logger_type : "mlflow" # mlflow or wandb
   tracking_uri: "" # e.g. "http://mymlflow.com:1234/"
   checkpoint_dir: "./ckps"
   seed: 42
+  # Save a disk checkpoint every N epochs for persistence/resumability.
+  # 0 = only at end.
+  checkpoint_save_interval: 1
 
 train:
   ###############
