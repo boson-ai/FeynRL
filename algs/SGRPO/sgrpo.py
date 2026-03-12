@@ -178,7 +178,12 @@ class SGRPO(COMMON):
 
         # Shuffle so each steps_per_epoch iteration micro_batches are processed in a
         # different sequence to avoid systematic bias from GA boundary placement.
-        random.shuffle(micro_batches)
+        # Use a local RNG seeded deterministically so the shuffle is reproducible
+        # across runs regardless of how many times train_step has been called.
+        call_idx = getattr(self, '_train_step_calls', 0)
+        self._train_step_calls = call_idx + 1
+        local_rng = random.Random(self.seed + engine_id + call_idx)
+        local_rng.shuffle(micro_batches)
 
         # 1. Models to train mode
         self.policy_engine.train()
