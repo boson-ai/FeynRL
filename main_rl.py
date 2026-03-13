@@ -805,11 +805,9 @@ def save_checkpoint(epoch,
                          description=f"checkpoint save (epoch {epoch+1})",
                          logger=logger)
 
-    # 2. save DeepSpeed engine state so we can resume training later
+    # 2. save DeepSpeed engine state so we can resume training later.
+    # Directory creation happens inside save_engine_state on DS rank 0.
     engine_state_dir = os.path.join(model_path, "ds_engine")
-    if rank == 0:
-        os.makedirs(engine_state_dir, exist_ok=True)
-
     state_futures = [engine.save_engine_state.remote(engine_state_dir) for engine in training_engines]
     ray_get_with_timeout(refs=state_futures,
                          timeout=save_timeout,
@@ -1226,6 +1224,8 @@ if __name__ == "__main__":
             # First epoch or overlap disabled, we generate synchronously
             # and it is considered on-policy (lag = 0)
             data_policy_version = policy_version
+            # Clear any leftover data from the previous epoch.
+            replay_buffer.reset()
             logger.info(f"[Epoch {epoch+1}/{number_of_epochs}] Starting rollout generation...")
             rollout_dataloader.batch_sampler.set_epoch(epoch)
             rollout_stats = collect_rollouts(dataloader=rollout_dataloader,
