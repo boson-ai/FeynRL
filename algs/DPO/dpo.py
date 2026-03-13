@@ -13,7 +13,9 @@ class DPO:
         # ref model would not be updated, so we put it in eval mode from get-go
         self.ref_model_engine.eval()
         self.optimizer = optimizer
-        self.normalize_loss = normalize_loss
+        # normalize_loss is accepted for interface consistency with SFT but is unused:
+        # DPO loss is inherently per-example, length-normalized log-ratios and mean
+        # over the batch is the correct reduction regardless of this flag.
         self.beta = beta
 
         # use cross entropy loss
@@ -65,6 +67,9 @@ class DPO:
 
         # dpo loss: -log sigmoid(beta * (chosen_reward - rejected_reward))
         loss = -F.logsigmoid(self.beta * (chosen_rewards - rejected_rewards)).mean()
+
+        if torch.isnan(loss) or torch.isinf(loss):
+            raise ValueError(f"DPO loss is NaN or Inf: {loss.item()}")
 
         metrics = {"loss": float(loss.item()),
                    "chosen_rewards": float(chosen_rewards.mean().item()),

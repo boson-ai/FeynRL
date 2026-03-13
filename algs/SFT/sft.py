@@ -52,6 +52,9 @@ class SFT:
         else:
             loss = loss_sum
 
+        if torch.isnan(loss) or torch.isinf(loss):
+            raise ValueError(f"SFT loss is NaN or Inf: {loss.item()}")
+
         return loss, loss_sum.item(), loss_mask.sum().item()
 
     def forward(self, batch):
