@@ -384,14 +384,44 @@ class PPO(COMMON):
                     all_valid_advs.append(advs[mask_bool].cpu())
                 unnormalized_data.append((rets.cpu(), advs.cpu()))
 
-        # Normalize advantages across the full batch in the current rank
+        # Normalize advantages across ALL ranks so every rank uses the same
+        # baseline. Each rank computes its own mean/std from ~1/N of the data
+        # which biases the gradient aggregation so we need aggerate them across all ranks.
         if len(all_valid_advs) > 0:
             all_valid_advs = torch.cat(all_valid_advs)
-            mean = all_valid_advs.mean()
-            std = all_valid_advs.std(unbiased=False) + 1e-8
+            local_sum      = all_valid_advs.sum().item()
+            local_count    = float(len(all_valid_advs))
+            # get the data from all ranks
+            if torch.distributed.is_initialized():
+                # float64 is used for numerical stability
+                stats = torch.tensor([local_sum, local_count], dtype=torch.float64, device=device)
+                torch.distributed.all_reduce(stats)
+                global_sum   = stats[0].item()
+                global_count = stats[1].item()
+
+            else:
+                global_sum   = local_sum
+                global_count = local_count
+            # calculate the global mean, convert it to float32
+            mean = float(global_sum / max(global_count, 1.0))
+
+            local_sq_sum = ((all_valid_advs - mean) ** 2).sum().item()
+            if torch.distributed.is_initialized():
+                # float64 is used for numerical stability
+                sq_tensor = torch.tensor([local_sq_sum], dtype=torch.float64, device=device)
+                torch.distributed.all_reduce(sq_tensor)
+                global_sq_sum = sq_tensor.item()
+
+            else:
+                global_sq_sum = local_sq_sum
+
+            # calculate the global std, convert it to float32
+            std = float((global_sq_sum / max(global_count, 1.0)) ** 0.5 + 1e-8)
+
             normalized_data = []
             for rets, advs in unnormalized_data:
                 normalized_data.append((rets, (advs - mean) / std))
+
             return normalized_data
 
         else:
