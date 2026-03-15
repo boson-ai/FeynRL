@@ -74,6 +74,9 @@ def test_calculate_gae():
     # Mock methods being called
     dummy_self.value_forward = MagicMock(return_value=(torch.zeros(1, 3), torch.zeros(1)))
     dummy_self.compute_advantages = MagicMock(return_value=(torch.ones(1, 3), torch.ones(1, 3)))
+    # Bind get_global_stats so calculate_gae can call self.get_global_stats
+    import types
+    dummy_self.get_global_stats = types.MethodType(ppo_logic.get_global_stats, dummy_self)
     
     micro_batches = [
         {
