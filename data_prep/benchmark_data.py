@@ -437,6 +437,7 @@ ALL_SHARDS = [
     ("aime2025",    "AIME2025-II"),
     ("hmmt_feb_25", None),
     ("hmmt_nov_25", None),
+    ("brumo_2025",  None),
 ]
 
 
