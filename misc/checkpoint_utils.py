@@ -11,7 +11,7 @@ from huggingface_hub import split_torch_state_dict_into_shards
 
 def gather_params_for_save(module, rank):
     '''
-        Gather all parameters from a deepspeed wrapped module one at a time.
+        Gather all parameters from a deepspeed wrapped module.
         Returns {name: cpu_tensor} on rank 0, empty dict on others.
         Must be called on ALL ranks for ZeRO-3 collective correctness.
     '''
@@ -25,6 +25,8 @@ def gather_params_for_save(module, rank):
     state_dict = {}
 
     if is_zero3:
+        # Gather one param at a time to avoid oon. Each param is materialized
+        # on rank 0, copied to cpu, then released before the next param is gathered.
         for name, param in zip(names, params):
             with deepspeed.zero.GatheredParameters([param], modifier_rank=0):
                 if rank == 0:
@@ -111,7 +113,8 @@ def merge_peft_state_dict(raw_state_dict, lora_alpha, lora_rank):
             base_weights[base_key] = base_weights[base_key] + delta.to(base_weights[base_key].dtype)
 
         else:
-            print(f"[WARNING] merge_peft_state_dict: no base weight found for {module_path}")
+            raise RuntimeError(f"merge_peft_state_dict: no base weight found for {module_path}, "
+                               f"LoRA delta would be silently dropped. Look for before merging: ")
 
     # 3. Remap names: strip peft_prefix and .base_layer suffix
     for peft_name, tensor in base_weights.items():
@@ -180,7 +183,7 @@ def resume_from_checkpoint(resume_path, model_engine, world_size, logger):
                              f"DeepSpeed ZeRO optimizer state is partitioned by world size and cannot be resharded.")
 
     logger.info(f"[Resume] Loading checkpoint from {resume_path} "
-                f"(epoch={saved_epoch}, global_step={global_step})")
+                f"(completed epoch {saved_epoch + 1}, global_step={global_step})")
 
     # Load DS engine state (model weights + optimizer + scheduler + RNG)
     engine_state_dir = os.path.join(resume_path, "ds_engine")
@@ -308,11 +311,17 @@ def save_training_checkpoint(epoch, global_step, model_engine, tokenizer,
                           'global_step': global_step,
                           'world_size': world_size}
 
-        with open(os.path.join(model_path, "training_state.json"), "w") as f:
+        state_file = os.path.join(model_path, "training_state.json")
+        with open(state_file, "w") as f:
             json.dump(training_state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
 
-        with open(os.path.join(model_path, "CHECKPOINT_COMPLETE"), "w") as f:
+        marker_file = os.path.join(model_path, "CHECKPOINT_COMPLETE")
+        with open(marker_file, "w") as f:
             f.write("")
+            f.flush()
+            os.fsync(f.fileno())
         logger.info(f"[Epoch {epoch+1}] Checkpoint saved: {model_path}")
 
     if torch.distributed.is_initialized():
@@ -324,14 +333,13 @@ def cleanup_incomplete_checkpoints(experiment_dir, rank, logger):
         These are leftovers from crashed runs and are not safe to resume from.
         Must be called on all ranks (rank 0 does the deletion, then barrier).
     '''
-    if os.path.isdir(experiment_dir):
+    if rank == 0 and os.path.isdir(experiment_dir):
         for entry in os.listdir(experiment_dir):
             ckpt_path = os.path.join(experiment_dir, entry)
 
             if os.path.isdir(ckpt_path) and not os.path.exists(os.path.join(ckpt_path, "CHECKPOINT_COMPLETE")):
-                if rank == 0:
-                    logger.warning(f"Removing incomplete checkpoint: {ckpt_path}")
-                    shutil.rmtree(ckpt_path, ignore_errors=True)
+                logger.warning(f"Removing incomplete checkpoint: {ckpt_path}")
+                shutil.rmtree(ckpt_path, ignore_errors=True)
 
     # Barrier must always be reached by all ranks, even when the directory
     # doesn't exist on some ranks, for example nfs propagation delay, to avoid deadlock.
