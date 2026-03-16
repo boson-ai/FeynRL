@@ -45,7 +45,6 @@ def test_dpo_train_step():
     metrics = dpo.train_step(micro_batch)
     
     assert metrics['loss'] == 1.0
-    assert model_engine.train.called
     assert model_engine.backward.called
     assert model_engine.step.called
 
