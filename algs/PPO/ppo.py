@@ -284,7 +284,7 @@ class PPO(COMMON):
                 'approx_kl': approx_kl.item(),
                 'ent_loss': loss_ent.item(),
                 'pi_loss': loss_pi.item(),
-                'pi_loss_total': loss_total.item(),
+                'loss_total': loss_total.item(),
                 'kl_ref': kl_ref.item(),
             }
 
@@ -468,7 +468,7 @@ class PPO(COMMON):
         # across runs regardless of how many times train_step has been called.
         call_idx = getattr(self, '_train_step_calls', 0)
         self._train_step_calls = call_idx + 1
-        local_rng = random.Random(self.seed + engine_id + call_idx)
+        local_rng = random.Random(f"{self.seed}_{engine_id}_{call_idx}")
         local_rng.shuffle(paired)
 
         # torch.distributed.get_rank() would be the same thing as engine_id

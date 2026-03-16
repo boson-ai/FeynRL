@@ -29,7 +29,7 @@ This flag does **not** change sampling as we still sample uniformly from replay.
 
 - **Masking**: Padded and prompt positions are zeroed out in both the loss and all metrics. The denominator for mean computation is `mask.sum()` (clamped to ≥ 1).
 
-- **Tracked metrics** (averaged across micro-batches): such as `clipfrac` (fraction of masked tokens where ratio falls outside the clip range), `approx_kl` (variance-reduced approximate KL between current and old policy), `ent_loss`, `pi_loss`, `pi_loss_total`, `kl_ref`, etc.
+- **Tracked metrics** (averaged across micro-batches): such as `clipfrac` (fraction of masked tokens where ratio falls outside the clip range), `approx_kl` (variance-reduced approximate KL between current and old policy), `ent_loss`, `pi_loss`, `loss_total`, `kl_ref`, etc.
 
 
 **Input:** initial policy parameters $\theta_0$, replay shards $\mathcal{B}$ (`micro_batches`)

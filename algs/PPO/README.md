@@ -20,7 +20,7 @@ The `value_forward` method returns `values [B, T-1]` (prediction-aligned, droppi
 
 - **GAE validation checks**: `compute_advantages` validates that rewards and values contain no NaN on valid positions, that `done` flags are not set on padding positions, and that the mask has no non-contiguous holes (e.g., `[1,1,0,1,1]` is rejected).
 
-- **Tracked metrics**: Policy metrics (`clipfrac`, `approx_kl`, `ent_loss`, `pi_loss`, `pi_loss_total`, `kl_ref`) plus `value_loss_v` (value function MSE loss).
+- **Tracked metrics**: Policy metrics (`clipfrac`, `approx_kl`, `ent_loss`, `pi_loss`, `loss_total`, `kl_ref`) plus `value_loss_v` (value function MSE loss).
 
 
 **Input:** initial policy parameters $\theta_0$, initial value parameters $\phi_0$, replay shards $\mathcal{B}$ (`micro_batches`)
