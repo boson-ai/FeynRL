@@ -612,57 +612,48 @@ def finalize_rollouts(all_futures, replay_buffer, logger, rollout_timeout, start
 
     if total_samples_generated == 0:
         logger.warning("No samples generated during rollout phase!")
-        # reward stats
-        avg_reward = 0.0
-        reward_std = 0.0
-        reward_min = 0.0
-        reward_max = 0.0
-        frac_positive_reward = 0.0
-        avg_zscore = 0.0
-        zscore_std = 0.0
-        # response stats
-        avg_response_len = 0.0
-        min_response_len = 0.0
-        max_response_len = 0.0
-        truncated_ratio = 0.0
-        # eos stats
-        eos_ratio = 0.0
-        finish_reason_stop_ratio = 0.0
-        response_len_std = 0.0
-        mean_logprob = 0.0
-        avg_prompt_len = 0.0
-        unique_response_ratio = 0.0
-        tps = 0.0
+        return {"total_samples_generated": 0, "total_tokens": 0,
+                "avg_zscore": 0, "zscore_std": 0,
+                "avg_reward": 0, "total_reward": 0,
+                "reward_std": 0, "reward_min": 0,
+                "reward_max": 0, "frac_positive_reward": 0,
+                "avg_response_len": 0, "min_response_len": 0,
+                "max_response_len": 0, "response_len_std": 0,
+                "truncated_ratio": 0, "eos_ratio": 0,
+                "finish_reason_stop_ratio": 0,
+                "mean_logprob": 0, "avg_prompt_len": 0,
+                "unique_response_ratio": 0, "tokens_per_sec": 0,
+                "rollout_time": finalize_time, "rollout_time_with_overlap": wall_time,
+                }
+    # reward stats
+    reward_arr = np.array(all_rewards)
+    avg_reward = np.mean(reward_arr)
+    reward_std = float(np.std(reward_arr))
+    reward_min = float(np.min(reward_arr))
+    reward_max = float(np.max(reward_arr))
+    frac_positive_reward = np.mean(reward_arr > 0)
+    zscore_arr = np.array(all_zscores)
+    avg_zscore = np.mean(zscore_arr)
+    zscore_std = float(np.std(zscore_arr))
+
+    # response stats
+    avg_response_len = np.mean(all_response_lens)
+    response_len_std = float(np.std(all_response_lens))
+    truncated_ratio = total_truncated / total_samples_generated
+
+    # other stats
+    eos_ratio = total_eos / total_samples_generated
+    finish_reason_stop_ratio = total_finish_stop / total_samples_generated
+    mean_logprob   = total_logprob_sum / max(1, total_logprob_tokens)
+    avg_prompt_len = total_prompt_len / total_samples_generated
+    if prompt_response_groups:
+        ratios = [len(v[1]) / v[0] for v in prompt_response_groups.values()]
+        unique_response_ratio = sum(ratios) / len(ratios)
+
     else:
-        # reward stats
-        reward_arr = np.array(all_rewards)
-        avg_reward = np.mean(reward_arr)
-        reward_std = float(np.std(reward_arr))
-        reward_min = float(np.min(reward_arr))
-        reward_max = float(np.max(reward_arr))
-        frac_positive_reward = np.mean(reward_arr > 0)
-        zscore_arr = np.array(all_zscores)
-        avg_zscore = np.mean(zscore_arr)
-        zscore_std = float(np.std(zscore_arr))
-
-        # response stats
-        avg_response_len = np.mean(all_response_lens)
-        response_len_std = float(np.std(all_response_lens))
-        truncated_ratio = total_truncated / total_samples_generated
-
-        # other stats
-        eos_ratio = total_eos / total_samples_generated
-        finish_reason_stop_ratio = total_finish_stop / total_samples_generated
-        mean_logprob   = total_logprob_sum / max(1, total_logprob_tokens)
-        avg_prompt_len = total_prompt_len / total_samples_generated
-        if prompt_response_groups:
-            ratios = [len(v[1]) / v[0] for v in prompt_response_groups.values()]
-            unique_response_ratio = sum(ratios) / len(ratios)
-
-        else:
-            unique_response_ratio = 0.0
-        # pure rollout processing time, comparable across modes
-        tps = total_tokens / max(1e-6, finalize_time)
+        unique_response_ratio = 0.0
+    # pure rollout processing time, comparable across modes
+    tps = total_tokens / max(1e-6, finalize_time)
 
     return {"total_samples_generated": total_samples_generated,
             "total_tokens": total_tokens,
@@ -1151,10 +1142,10 @@ if __name__ == "__main__":
     sync_timeout = config.run.sync_timeout
 
     # Overlap mode settings
-    overlap_enabled = config.run.overlap_enabled
+    overlap_enabled = config.overlap.enabled if config.overlap else False
     # Max training steps ahead of rollout policy version. With overlap_max_lag=N, weights sync every N epochs
     # since policy_version increments by 1 each epoch, lag reaches N every N epochs.
-    overlap_max_lag = config.run.overlap_max_lag
+    overlap_max_lag = config.overlap.max_lag if config.overlap else None
 
     ########
     # 7b. Resume from checkpoint (if requested)
