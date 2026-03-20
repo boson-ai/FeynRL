@@ -18,6 +18,7 @@ from data_feeds.prompts import PromptsFeed # our custom pytorch dataset
 from data_feeds.mixed_sampler import create_prompt_dataset_and_sampler
 from misc.utils import safe_string_to_torch_dtype, get_experiment_dir_name, load_algorithm, ray_get_with_timeout, set_random_seeds, get_determinism_env_vars
 from rollouts.vllm_engine import VLLMRolloutEngine
+from rollouts.vllm_engine_async import VLLMRolloutEngineAsync
 from rollouts.replay_buffer import ReplayBuffer
 from misc.logging import setup_logging, setup_tracker
 
@@ -169,10 +170,15 @@ def create_rollout_engines(params, reward_fnc, eos_id):
         # same prompt → same output regardless of engine count
         if params.rollout.batch_invariant:
             rollout_env_vars["VLLM_BATCH_INVARIANT"] = "1"
+        if params.overlap and params.overlap.enabled:
+            engines.append(VLLMRolloutEngineAsync.options(num_gpus=tp,
+                                                          runtime_env={"env_vars": rollout_env_vars}
+                                                         ).remote(**kwargs))
 
-        engines.append(VLLMRolloutEngine.options(num_gpus=tp,
-                                                 runtime_env={"env_vars": rollout_env_vars}
-                                                ).remote(**kwargs))
+        else:
+            engines.append(VLLMRolloutEngine.options(num_gpus=tp,
+                                                    runtime_env={"env_vars": rollout_env_vars}
+                                                    ).remote(**kwargs))
 
     return engines
 
@@ -515,28 +521,6 @@ def collect_rollouts(dataloader,
             "unique_response_ratio": unique_response_ratio,
             "rollout_time": rollout_time,
             "tokens_per_sec": tps}
-
-def collect_rollouts_async(dataloader, rollout_engines, epoch, policy_version):
-    '''
-        Non-blocking rollout collection: iterates the dataloader and schedules
-        all rollout generation, then returns control immediately without waiting for results.
-    '''
-    num_rollout_engines = len(rollout_engines)
-    all_futures = []
-
-    for rollout_batch in dataloader:
-        rollout_shards = shard_batch_for_engines(rollout_batch, num_rollout_engines)
-        if not rollout_shards:
-            continue
-
-        batch_futures = []
-        for i, shard in enumerate(rollout_shards):
-            batch_futures.append(rollout_engines[i].generate.remote(prompts=shard,
-                                                                    current_iter=epoch,
-                                                                    policy_version=policy_version))
-        all_futures.append(batch_futures)
-
-    return all_futures
 
 def finalize_rollouts(all_futures, replay_buffer, logger, rollout_timeout, start_time=None):
     '''
