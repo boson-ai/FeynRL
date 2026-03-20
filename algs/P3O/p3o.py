@@ -102,7 +102,7 @@ class P3O(COMMON):
             return torch.tensor(1.0, device=ratio.device)
 
         ess = (valid_ratios.sum()**2) / (valid_ratios.pow(2).sum() + 1e-8) / n
-        return ess
+        return ess.item()
 
     def compute_policy_loss(self,
                             logprobs: torch.Tensor,
@@ -182,7 +182,7 @@ class P3O(COMMON):
                 'pi_loss': loss_pi.item(),
                 'loss_total': loss_total.item(),
                 'kl_ref': kl_ref.item(),
-                'ess_factor': ess_factor.item(),
+                'ess_factor': ess_factor,
             }
 
         return loss_total, metrics
