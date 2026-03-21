@@ -84,13 +84,13 @@ class WeightSyncExtension:
         # For TP=1, torch.distributed may not be initialized, so tp_rank defaults to 0.
         tp_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         my_rank = rank_offset + tp_rank
-        self._weight_sync_rank = my_rank
-        self._weight_sync_group = create_nccl_process_group(init_method=f"tcp://{master_addr}:{master_port}",
-                                                            rank=my_rank,
-                                                            world_size=world_size,
-                                                            group_name=group_name,
-                                                            timeout_seconds=timeout_seconds,
-                                                            )
+        self.weight_sync_rank = my_rank
+        self.weight_sync_group = create_nccl_process_group(init_method=f"tcp://{master_addr}:{master_port}",
+                                                           rank=my_rank,
+                                                           world_size=world_size,
+                                                           group_name=group_name,
+                                                           timeout_seconds=timeout_seconds,
+                                                          )
         return True
 
     def update_weights_nccl(self, param_name, dtype_str, shape, empty_cache=False):
@@ -106,16 +106,16 @@ class WeightSyncExtension:
                 empty_cache: Whether to call torch.cuda.empty_cache() after loading.
             Returns the number of weights loaded (0 or 1).
         '''
-        dtype_map = {"torch.float16": torch.float16,
+        dtype_map = {"torch.float16":  torch.float16,
                      "torch.bfloat16": torch.bfloat16,
-                     "torch.float32": torch.float32,}
+                     "torch.float32":  torch.float32,}
         target_dtype = dtype_map.get(dtype_str, torch.bfloat16)
 
         # Allocate receive buffer on GPU
         buffer = torch.empty(shape, dtype=target_dtype, device="cuda")
 
         # NCCL broadcast: rank 0 sends, all others receive
-        torch.distributed.broadcast(buffer, src=0, group=self._weight_sync_group)
+        torch.distributed.broadcast(buffer, src=0, group=self.weight_sync_group)
 
         # Load into model. vllm's load_weights handles tp sharding internally
         self.model_runner.model.load_weights(weights=[(param_name, buffer)])
@@ -130,11 +130,11 @@ class WeightSyncExtension:
         '''
             Destroy the custom NCCL process group which is called during shutdown.
         '''
-        if hasattr(self, '_weight_sync_group') and self._weight_sync_group is not None:
+        if hasattr(self, 'weight_sync_group') and self.weight_sync_group is not None:
             try:
-                torch.distributed.destroy_process_group(self._weight_sync_group)
+                torch.distributed.destroy_process_group(self.weight_sync_group)
 
             except Exception:
                 pass
 
-            self._weight_sync_group = None
+            self.weight_sync_group = None
