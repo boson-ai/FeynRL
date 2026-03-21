@@ -2,18 +2,16 @@ import os
 import json
 import torch
 import torch.nn as nn
-from dataclasses import dataclass
+from typing import NamedTuple
 from peft import PeftModel, get_peft_model, LoraConfig
 from transformers import AutoModelForCausalLM, AutoConfig
 from safetensors.torch import load_file
 
-@dataclass
-class ValueOutput:
+class ValueOutput(NamedTuple):
     '''
-        Typed return object for ValueNetwork.forward(). Using a dataclass instead
-        of SimpleNamespace as SimpleNamespace is opaque to DeepSpeed and triggers:
-        e.g, A module has unknown inputs or outputs type.
-        dataclass is introspectable via its fields, so ds zero-3 can find the logits tensor and hook correctly.
+        Typed return object for ValueNetwork.forward(). NamedTuple is a tuple
+        subclass, so DeepSpeed's apply_to_tensors_only can recurse into it
+        and find the logits tensor for ZeRO-3 hooks.
     '''
     logits: torch.Tensor
 
