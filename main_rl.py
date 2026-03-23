@@ -22,6 +22,7 @@ from rollouts.vllm_engine_async import VLLMRolloutEngineAsync
 from rollouts.replay_buffer import ReplayBuffer
 from misc.logging import setup_logging, setup_tracker
 from misc.setup_rl import load_tokenizer, save_checkpoint, load_checkpoint_for_resume
+import misc.rollout_stats as rollout_stats
 
 Algorithm_Registry = {# supported algorithms
                       'sgrpo': ('algs.SGRPO.sgrpo', 'SGRPO'),
@@ -343,25 +344,7 @@ def collect_rollouts(dataloader,
     '''
     num_rollout_engines = len(rollout_engines)
     rollout_start_time = time.time()
-    total_samples_generated = 0
-    # rewards
-    all_rewards = []
-    all_zscores = []
-    # response
-    all_response_lens = []
-    min_response_len = float('inf')
-    max_response_len = float('-inf')
-    # logprobs
-    total_logprob_sum = 0.0
-    total_logprob_tokens = 0
-    # tokens
-    total_tokens = 0
-    total_truncated = 0
-    total_eos = 0
-    total_finish_stop = 0
-    # prompts
-    total_prompt_len = 0
-    prompt_response_groups = {}
+    acc = rollout_stats.new_accumulator()
 
     # rollout_samples_per_epoch is the number of PROMPTS, not total completions.
     # example: rollout_gpus=2, rollout_batch_size_per_gpu=12, n_samples=3, rollout_samples_per_epoch = 25
@@ -402,25 +385,7 @@ def collect_rollouts(dataloader,
 
         # 4. merge rollouts across all engines and collect stats
         rollout_merged, stats = merge_rollout_with_stats(rollout_lists)
-        all_rewards.extend(stats['all_rewards'])
-        all_zscores.extend(stats['all_zscores'])
-        min_response_len = min(min_response_len, stats['min_response_len'])
-        max_response_len = max(max_response_len, stats['max_response_len'])
-        all_response_lens.extend(stats['all_response_lens'])
-        total_truncated += stats['total_truncated']
-        total_eos += stats['total_eos']
-        total_finish_stop += stats['total_finish_stop']
-        total_samples_generated += stats['total_samples_generated']
-        total_logprob_sum += stats['total_logprob_sum']
-        total_logprob_tokens += stats['total_logprob_tokens']
-        total_prompt_len += stats['total_prompt_len']
-        total_tokens += stats['total_tokens']
-        for pk, (cnt, resp_set) in stats['prompt_response_groups'].items():
-            if pk in prompt_response_groups:
-                prompt_response_groups[pk][0] += cnt
-                prompt_response_groups[pk][1] |= resp_set
-            else:
-                prompt_response_groups[pk] = [cnt, resp_set]
+        rollout_stats.accumulate(acc, stats)
 
         # 5. now add them to replay buffer
         replay_buffer.add_batch_seqs(rollout_merged)
@@ -428,225 +393,10 @@ def collect_rollouts(dataloader,
     if len(replay_buffer) == 0:
         raise ValueError("Replay buffer is empty")
 
-    rollout_time = time.time() - rollout_start_time
-    if total_samples_generated == 0:
+    if acc['total_samples_generated'] == 0:
         logger.warning("No samples generated during rollout phase!")
-        # reward stats
-        avg_reward = 0.0
-        reward_std = 0.0
-        reward_min = 0.0
-        reward_max = 0.0
-        frac_positive_reward = 0.0
-        avg_zscore = 0.0
-        zscore_std = 0.0
-        # response stats
-        avg_response_len = 0.0
-        min_response_len = 0.0
-        max_response_len = 0.0
-        truncated_ratio = 0.0
-        # eos stats
-        eos_ratio = 0.0
-        finish_reason_stop_ratio = 0.0
-        response_len_std = 0.0
-        mean_logprob = 0.0
-        avg_prompt_len = 0.0
-        unique_response_ratio = 0.0
-        tps = 0.0
-    else:
-        # reward stats
-        reward_arr = np.array(all_rewards)
-        avg_reward = np.mean(reward_arr)
-        reward_std = float(np.std(reward_arr))
-        reward_min = float(np.min(reward_arr))
-        reward_max = float(np.max(reward_arr))
-        frac_positive_reward = np.mean(reward_arr > 0)
-        zscore_arr = np.array(all_zscores)
-        avg_zscore = np.mean(zscore_arr)
-        zscore_std = float(np.std(zscore_arr))
 
-        # response stats
-        avg_response_len = np.mean(all_response_lens)
-        response_len_std = float(np.std(all_response_lens))
-        truncated_ratio = total_truncated / total_samples_generated
-
-        # other stats
-        eos_ratio = total_eos / total_samples_generated
-        finish_reason_stop_ratio = total_finish_stop / total_samples_generated
-        mean_logprob   = total_logprob_sum / max(1, total_logprob_tokens)
-        avg_prompt_len = total_prompt_len / total_samples_generated
-        if prompt_response_groups:
-            ratios = [len(v[1]) / v[0] for v in prompt_response_groups.values()]
-            unique_response_ratio = sum(ratios) / len(ratios)
-
-        else:
-            unique_response_ratio = 0.0
-
-        tps = total_tokens / max(1e-6, rollout_time)
-
-    return {"total_samples_generated": total_samples_generated,
-            "total_tokens": total_tokens,
-            "avg_zscore": avg_zscore,
-            "zscore_std": zscore_std,
-            "avg_reward": avg_reward,
-            "total_reward": sum(all_rewards),
-            "reward_std": reward_std,
-            "reward_min": reward_min,
-            "reward_max": reward_max,
-            "frac_positive_reward": frac_positive_reward,
-            "avg_response_len": avg_response_len,
-            "min_response_len": min_response_len,
-            "max_response_len": max_response_len,
-            "response_len_std": response_len_std,
-            "truncated_ratio": truncated_ratio,
-            "eos_ratio": eos_ratio,
-            "finish_reason_stop_ratio": finish_reason_stop_ratio,
-            "mean_logprob": mean_logprob,
-            "avg_prompt_len": avg_prompt_len,
-            "unique_response_ratio": unique_response_ratio,
-            "rollout_time": rollout_time,
-            "tokens_per_sec": tps}
-
-def finalize_rollouts(all_futures, replay_buffer, logger, rollout_timeout, start_time=None):
-    '''
-        Blocking call to gather all previously scheduled rollouts from
-        collect_rollouts_async and add them to the replay buffer.
-    '''
-    # wall_start_time: when the async rollout was first scheduled (includes training overlap time)
-    # finalize_start_time: when we actually started waiting for results (generation-only time)
-    wall_start_time = start_time if start_time is not None else time.time()
-    finalize_start_time = time.time()
-
-    total_samples_generated = 0
-    # rewards
-    all_rewards = []
-    all_zscores = []
-    # response
-    all_response_lens = []
-    min_response_len = float('inf')
-    max_response_len = float('-inf')
-    # logprobs
-    total_logprob_sum = 0.0
-    total_logprob_tokens = 0
-    # tokens
-    total_tokens = 0
-    total_truncated = 0
-    total_eos = 0
-    total_finish_stop = 0
-    # prompts
-    total_prompt_len = 0
-    prompt_response_groups = {}
-
-    for batch_futures in all_futures:
-        rollout_lists = ray_get_with_timeout(refs=batch_futures,
-                                             timeout=rollout_timeout,
-                                             description="finalize prefetched rollouts",
-                                             logger=logger)
-
-        # 4. merge rollouts across all engines and collect stats
-        rollout_merged, stats = merge_rollout_with_stats(rollout_lists)
-        # collect stats
-        all_rewards.extend(stats['all_rewards'])
-        all_zscores.extend(stats['all_zscores'])
-        min_response_len = min(min_response_len, stats['min_response_len'])
-        max_response_len = max(max_response_len, stats['max_response_len'])
-        all_response_lens.extend(stats['all_response_lens'])
-        total_truncated += stats['total_truncated']
-        total_eos += stats['total_eos']
-        total_finish_stop += stats['total_finish_stop']
-        total_samples_generated += stats['total_samples_generated']
-        total_logprob_sum += stats['total_logprob_sum']
-        total_logprob_tokens += stats['total_logprob_tokens']
-        total_prompt_len += stats['total_prompt_len']
-        total_tokens += stats['total_tokens']
-        # collect prompt response groups
-        # prompt_ids tuple -> [total_count, set of unique response texts]
-        for pk, (cnt, resp_set) in stats['prompt_response_groups'].items():
-            if pk in prompt_response_groups:
-                prompt_response_groups[pk][0] += cnt
-                prompt_response_groups[pk][1] |= resp_set
-
-            else:
-                prompt_response_groups[pk] = [cnt, resp_set]
-
-        replay_buffer.add_batch_seqs(rollout_merged)
-
-    if len(replay_buffer) == 0:
-        raise ValueError("Replay buffer is empty after finalize_rollouts")
-
-    # wall_time: total time since scheduling (includes overlapped training time)
-    # finalize_time: time spent in this function waiting/processing (generation-only perspective)
-    wall_time = time.time() - wall_start_time
-    finalize_time = time.time() - finalize_start_time
-
-    if total_samples_generated == 0:
-        logger.warning("No samples generated during rollout phase!")
-        return {"total_samples_generated": 0, "total_tokens": 0,
-                "avg_zscore": 0, "zscore_std": 0,
-                "avg_reward": 0, "total_reward": 0,
-                "reward_std": 0, "reward_min": 0,
-                "reward_max": 0, "frac_positive_reward": 0,
-                "avg_response_len": 0, "min_response_len": 0,
-                "max_response_len": 0, "response_len_std": 0,
-                "truncated_ratio": 0, "eos_ratio": 0,
-                "finish_reason_stop_ratio": 0,
-                "mean_logprob": 0, "avg_prompt_len": 0,
-                "unique_response_ratio": 0, "tokens_per_sec": 0,
-                "rollout_time": finalize_time, "rollout_time_with_overlap": wall_time,
-                }
-    # reward stats
-    reward_arr = np.array(all_rewards)
-    avg_reward = np.mean(reward_arr)
-    reward_std = float(np.std(reward_arr))
-    reward_min = float(np.min(reward_arr))
-    reward_max = float(np.max(reward_arr))
-    frac_positive_reward = np.mean(reward_arr > 0)
-    zscore_arr = np.array(all_zscores)
-    avg_zscore = np.mean(zscore_arr)
-    zscore_std = float(np.std(zscore_arr))
-
-    # response stats
-    avg_response_len = np.mean(all_response_lens)
-    response_len_std = float(np.std(all_response_lens))
-    truncated_ratio = total_truncated / total_samples_generated
-
-    # other stats
-    eos_ratio = total_eos / total_samples_generated
-    finish_reason_stop_ratio = total_finish_stop / total_samples_generated
-    mean_logprob   = total_logprob_sum / max(1, total_logprob_tokens)
-    avg_prompt_len = total_prompt_len / total_samples_generated
-    if prompt_response_groups:
-        ratios = [len(v[1]) / v[0] for v in prompt_response_groups.values()]
-        unique_response_ratio = sum(ratios) / len(ratios)
-
-    else:
-        unique_response_ratio = 0.0
-    # pure rollout processing time, comparable across modes
-    tps = total_tokens / max(1e-6, finalize_time)
-
-    return {"total_samples_generated": total_samples_generated,
-            "total_tokens": total_tokens,
-            "avg_zscore": avg_zscore,
-            "zscore_std": zscore_std,
-            "avg_reward": avg_reward,
-            "total_reward": sum(all_rewards),
-            "reward_std": reward_std,
-            "reward_min": reward_min,
-            "reward_max": reward_max,
-            "frac_positive_reward": frac_positive_reward,
-            "avg_response_len": avg_response_len,
-            "min_response_len": min_response_len,
-            "max_response_len": max_response_len,
-            "response_len_std": response_len_std,
-            "truncated_ratio": truncated_ratio,
-            "eos_ratio": eos_ratio,
-            "finish_reason_stop_ratio": finish_reason_stop_ratio,
-            "mean_logprob": mean_logprob,
-            "avg_prompt_len": avg_prompt_len,
-            "unique_response_ratio": unique_response_ratio,
-            "tokens_per_sec": tps,
-            "rollout_time": finalize_time,
-            "rollout_time_with_overlap": wall_time,
-            }
+    return rollout_stats.summarize(acc, rollout_time=time.time() - rollout_start_time)
 
 def prepare_training_batches(replay_buffer, batch_size: int, num_engines: int, seed: int = 0, epoch: int = 0) -> list:
     '''
@@ -1011,7 +761,7 @@ if __name__ == "__main__":
         replay_buffer.reset()
         logger.info(f"[Epoch {epoch+1}/{number_of_epochs}] Starting rollout generation...")
         rollout_dataloader.batch_sampler.set_epoch(epoch)
-        rollout_stats = collect_rollouts(dataloader=rollout_dataloader,
+        rollout_metrics = collect_rollouts(dataloader=rollout_dataloader,
                                             rollout_engines=rollout_engines,
                                             epoch=epoch,
                                             policy_version=policy_version,
@@ -1020,28 +770,28 @@ if __name__ == "__main__":
                                             logger=logger,
                                             rollout_timeout=rollout_timeout)
 
-        time_str = f"time={rollout_stats['rollout_time']:.2f}s"
-        if 'rollout_time_with_overlap' in rollout_stats:
-            time_str += f" (wall_time={rollout_stats['rollout_time_with_overlap']:.2f}s)"
+        time_str = f"time={rollout_metrics['rollout_time']:.2f}s"
+        if 'rollout_time_with_overlap' in rollout_metrics:
+            time_str += f" (wall_time={rollout_metrics['rollout_time_with_overlap']:.2f}s)"
 
-        logger.info(f"[Epoch {epoch + 1}] Rollout complete: {rollout_stats['total_samples_generated']} samples, "
-                    f"avg_reward={rollout_stats['avg_reward']:.4f}, reward_std={rollout_stats['reward_std']:.4f}, "
-                    f"reward_min={rollout_stats['reward_min']:.4f}, reward_max={rollout_stats['reward_max']:.4f}, "
-                    f"frac_positive_reward={rollout_stats['frac_positive_reward']:.4f}, "
-                    f"avg_response_len={rollout_stats['avg_response_len']:.1f}, "
-                    f"response_len_std={rollout_stats['response_len_std']:.1f}, "
-                    f"min_response_len={rollout_stats['min_response_len']:.1f}, "
-                    f"max_response_len={rollout_stats['max_response_len']:.1f}, "
-                    f"truncated_ratio={rollout_stats['truncated_ratio']:.4f}, "
-                    f"eos_ratio={rollout_stats['eos_ratio']:.4f}, "
-                    f"mean_logprob={rollout_stats['mean_logprob']:.4f}, "
-                    f"unique_response_ratio={rollout_stats['unique_response_ratio']:.4f}, "
-                    f"{time_str}, tps={rollout_stats['tokens_per_sec']:.2f}")
+        logger.info(f"[Epoch {epoch + 1}] Rollout complete: {rollout_metrics['total_samples_generated']} samples, "
+                    f"avg_reward={rollout_metrics['avg_reward']:.4f}, reward_std={rollout_metrics['reward_std']:.4f}, "
+                    f"reward_min={rollout_metrics['reward_min']:.4f}, reward_max={rollout_metrics['reward_max']:.4f}, "
+                    f"frac_positive_reward={rollout_metrics['frac_positive_reward']:.4f}, "
+                    f"avg_response_len={rollout_metrics['avg_response_len']:.1f}, "
+                    f"response_len_std={rollout_metrics['response_len_std']:.1f}, "
+                    f"min_response_len={rollout_metrics['min_response_len']:.1f}, "
+                    f"max_response_len={rollout_metrics['max_response_len']:.1f}, "
+                    f"truncated_ratio={rollout_metrics['truncated_ratio']:.4f}, "
+                    f"eos_ratio={rollout_metrics['eos_ratio']:.4f}, "
+                    f"mean_logprob={rollout_metrics['mean_logprob']:.4f}, "
+                    f"unique_response_ratio={rollout_metrics['unique_response_ratio']:.4f}, "
+                    f"{time_str}, tps={rollout_metrics['tokens_per_sec']:.2f}")
 
         # Log rollout metrics immediately so they appear in WandB/MLflow
         # before training starts (avoids visual lag in dashboards)
         if tracker:
-            rollout_log = {"rollout/" + k:v for k,v in rollout_stats.items()}
+            rollout_log = {"rollout/" + k:v for k,v in rollout_metrics.items()}
             tracker.log_metrics(rollout_log, step=global_step)
 
         ################
