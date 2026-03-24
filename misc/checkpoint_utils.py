@@ -154,7 +154,7 @@ def barrier_with_error_check(succeeded, device, label):
                            f"to prevent deadlock")
 
 
-def resume_from_checkpoint(resume_path, model_engine, world_size, logger):
+def resume_from_checkpoint(resume_path, model_engine, world_size, logger, zero_stage=None, model_dtype=None, use_peft=None):
     '''
         Resume training from a previously saved checkpoint.
         Validates the checkpoint, loads ds engine state (weights + optimizer +
@@ -183,6 +183,36 @@ def resume_from_checkpoint(resume_path, model_engine, world_size, logger):
         if saved_ws != world_size:
             raise ValueError(f"Checkpoint was saved with {saved_ws} GPUs but current run uses {world_size}. "
                              f"DeepSpeed ZeRO optimizer state is partitioned by world size and cannot be resharded.")
+
+    # Validate zeros stage matches, i.e., optimizer state format differs between stages
+    if zero_stage is not None and 'zero_stage' in training_state:
+        saved_zero = training_state['zero_stage']
+        if saved_zero is not None and saved_zero != zero_stage:
+            raise ValueError(f"Checkpoint was saved with ZeRO stage {saved_zero} but current config uses stage {zero_stage}. "
+                             f"Optimizer state format is incompatible across ZeRO stages.")
+
+    elif zero_stage is not None and 'zero_stage' not in training_state:
+        logger.warning("[Resume] Checkpoint has no zero_stage metadata, skipping ZeRO stage validation.")
+
+    # Validate model precision matches
+    if model_dtype is not None and 'model_dtype' in training_state:
+        saved_dtype = training_state['model_dtype']
+        if saved_dtype is not None and saved_dtype != model_dtype:
+            raise ValueError(f"Checkpoint was saved with dtype={saved_dtype} but current config uses dtype={model_dtype}. "
+                             f"Precision mismatch can corrupt optimizer states.")
+
+    elif model_dtype is not None and 'model_dtype' not in training_state:
+        logger.warning("[Resume] Checkpoint has no model_dtype metadata, skipping precision validation.")
+
+    # Validate PEFT mode matches, i.e., parameter structure differs
+    if use_peft is not None and 'use_peft' in training_state:
+        saved_peft = training_state['use_peft']
+        if saved_peft is not None and saved_peft != use_peft:
+            raise ValueError(f"Checkpoint was saved with use_peft={saved_peft} but current config uses use_peft={use_peft}. "
+                             f"Parameter names and optimizer state structure are incompatible.")
+
+    elif use_peft is not None and 'use_peft' not in training_state:
+        logger.warning("[Resume] Checkpoint has no use_peft metadata, skipping PEFT validation.")
 
     logger.info(f"[Resume] Loading checkpoint from {resume_path} "
                 f"(completed epoch {saved_epoch + 1}, global_step={global_step})")
@@ -214,9 +244,7 @@ def resume_from_checkpoint(resume_path, model_engine, world_size, logger):
     return start_epoch, global_step
 
 
-def save_training_checkpoint(epoch, global_step, model_engine, tokenizer,
-                             model_path, peft_config, rank, world_size, logger,
-                             label):
+def save_training_checkpoint(epoch, global_step, model_engine, tokenizer, model_path, peft_config, rank, world_size, logger, label, zero_stage=None, model_dtype=None):
     '''
         Save a full training checkpoint: HF-compatible weights, model config,
         generation config, tokenizer, DeepSpeed engine state (optimizer/scheduler/RNG),
@@ -311,7 +339,11 @@ def save_training_checkpoint(epoch, global_step, model_engine, tokenizer,
     if rank == 0:
         training_state = {'epoch': epoch,
                           'global_step': global_step,
-                          'world_size': world_size}
+                          'world_size': world_size,
+                          'zero_stage': zero_stage,
+                          'model_dtype': model_dtype,
+                          'use_peft': peft_config.use_peft,
+                          'peft_type': getattr(peft_config, 'peft_type', None) if peft_config.use_peft else None}
 
         state_file = os.path.join(model_path, "training_state.json")
         with open(state_file, "w") as f:
