@@ -566,8 +566,20 @@ if __name__ == "__main__":
     ########
     # 15. Clean shutdown
     ########
-    # release NCCL communicators and process group resources
-    # to prevent orphaned processes and hangs on exit in multi-node setups.
+    # release ds engine and cuda resources before tearing down nccl.
+    del model_engine
+    del optimizer
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
         torch.distributed.destroy_process_group()
+
+    # use os._exit to skip python atexit handlers that may trigger segv
+    # during final garbage collection of remaining cuda/nccl objects.
+    os._exit(0)
+    print('Done!')
