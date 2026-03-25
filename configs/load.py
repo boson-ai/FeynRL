@@ -667,8 +667,13 @@ def load_and_verify(method: str, input_yaml: str, experiment_id: str, rank: int,
             if weight_sync_method is None:
                 raise ValueError("weight_sync_method must be specified for rl training")
 
-            if weight_sync_method not in ["direct", "disk"]:
-                raise ValueError("weight_sync_method must be 'direct' or 'disk'")
+            if weight_sync_method not in ["direct", "disk", "nccl"]:
+                raise ValueError("weight_sync_method must be 'direct', 'disk', or 'nccl'")
+
+            overlap_enabled = config.overlap and config.overlap.enabled
+            if weight_sync_method == "nccl" and not overlap_enabled:
+                raise ValueError("weight_sync_method 'nccl' requires overlap.enabled=True "
+                                 "(sync rollout engine does not support NCCL)")
 
             max_tokens = config.rollout.max_tokens
             max_seq_len = config.data.max_seq_len
