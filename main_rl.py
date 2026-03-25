@@ -50,6 +50,7 @@ def create_training_engines(params, alg, world_size, master_addr, master_port):
                'entropy_coeff':params.train.entropy_coeff,
                'micro_batch_size_per_gpu':params.train.train_batch_size_per_gpu,
                'update_after_full_replay':params.train.update_after_full_replay,
+               'normalize_loss':params.train.normalize_loss,
 
                # deepspeed related arguments
                'deepspeed_config':params.deepspeed,
@@ -289,8 +290,7 @@ def merge_rollout_with_stats(rollout_lists):
             total_tokens += len(sample['prompt_ids']) + len(sample['response_ids'])
             total_truncated += sample['truncated']
 
-    stats = {
-            'total_samples_generated': total_samples_generated,
+    stats = {'total_samples_generated': total_samples_generated,
             'all_rewards': all_rewards,
             'all_zscores': all_zscores,
             'all_response_lens': all_response_lens,
@@ -303,8 +303,8 @@ def merge_rollout_with_stats(rollout_lists):
             'total_prompt_len': total_prompt_len,
             'prompt_response_groups': prompt_response_groups,
             'total_logprob_sum': total_logprob_sum,
-            'total_logprob_tokens': total_logprob_tokens,
-    }
+            'total_logprob_tokens': total_logprob_tokens,}
+
     return rollout_merged, stats
 
 def collect_rollouts(dataloader,

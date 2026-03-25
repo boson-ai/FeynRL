@@ -33,7 +33,7 @@ class Run(BaseModel):
     # 0 = only at end.
     checkpoint_save_interval: int | None = 1
 
-    # NCCL configuration for multi-node training over InfiniBand.
+    # NCCL configuration for network transport.
     # Leave nccl_socket_ifname and nccl_ib_hca null for single-node or when NCCL auto-detection works.
     # Set nccl_socket_ifname to the network interface carrying inter-node traffic (e.g., "eth0", "bond0"). run ip addr | grep addr
     nccl_socket_ifname: str | None = None

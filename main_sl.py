@@ -234,31 +234,27 @@ if __name__ == "__main__":
     checkpoint_save_interval = config.run.checkpoint_save_interval if config.run.checkpoint_save_interval is not None else 1
 
     ########
+    # 3. Initialize distributed backend early.
+    ########
+    # nccl topology discovery on multi-gpu nodes especially with InfiniBand can take time.
+    # Initializing here lets nccl establish connections while model loading runs on CPU,
+    # preventing hangs inside deepspeed.initialize().
+    # Set NCCL env vars before init to control transport selection.
+    if config.run.nccl_socket_ifname:
+        os.environ["NCCL_SOCKET_IFNAME"] = config.run.nccl_socket_ifname
+
+    if config.run.nccl_ib_hca:
+        os.environ["NCCL_IB_HCA"] = config.run.nccl_ib_hca
+    deepspeed.init_distributed()
+
+    ########
     # 4. load model or previous checkpoints
     ########
-    # Initialize distributed backend early so deepspeed.zero.Init() can partition
-    # parameters at creation time
-    if not torch.distributed.is_initialized():
-        deepspeed.init_distributed()
-
-    is_zero3 = config.deepspeed.zero_optimization.get("stage", 0) == 3
-    if is_zero3:
-        # stage 3 partitions parameters at creation to avoid every rank loading the full
-        # model into cpu ram which causes oom for large models on multi-gpu nodes.
-        # for stages 0/1/2, every rank must hold the full model parameters.
-        ds_config_dict = config.deepspeed.model_dump()
-        with deepspeed.zero.Init(config_dict_or_path=ds_config_dict):
-            model, tokenizer = load_models_and_tokenizer(model_name=config.model.name,
-                                                         model_dtype=config.model.dtype,
-                                                         trust_remote_code=config.model.trust_remote_code,
-                                                         attn_impl=config.model.attn_implementation,
-                                                         rank=rank)
-    else:
-        model, tokenizer = load_models_and_tokenizer(model_name=config.model.name,
-                                                     model_dtype=config.model.dtype,
-                                                     trust_remote_code=config.model.trust_remote_code,
-                                                     attn_impl=config.model.attn_implementation,
-                                                     rank=rank)
+    model, tokenizer = load_models_and_tokenizer(model_name=config.model.name,
+                                                 model_dtype=config.model.dtype,
+                                                 trust_remote_code=config.model.trust_remote_code,
+                                                 attn_impl=config.model.attn_implementation,
+                                                 rank=rank)
     # apply PEFT module if enabled
     if config.peft.use_peft:
         model = apply_peft_module(model=model, peft_config=config.peft, rank=rank)
@@ -272,7 +268,7 @@ if __name__ == "__main__":
         assert num_trainable > 0, "PEFT produced zero trainable parameters. Check peft.lora_target_modules"
 
     ########
-    # 5. Setup trainiing and inference engines
+    # 5. Setup training and inference engines
     ########
     if config.model.gradient_checkpointing:
         logger.info("Gradient checkpointing enabled")
@@ -287,6 +283,7 @@ if __name__ == "__main__":
             model.enable_input_require_grads()
 
     model_engine, optimizer = create_training_engine(deepspeed_config=config.deepspeed, model=model)
+    is_zero3 = config.deepspeed.zero_optimization.get("stage", 0) == 3
     engine_ga_steps_value = getattr(model_engine, "gradient_accumulation_steps")
     ga_steps = int(engine_ga_steps_value() if callable(engine_ga_steps_value) else engine_ga_steps_value)
     if ga_steps != config.train.gradient_accumulation_steps:
@@ -310,17 +307,19 @@ if __name__ == "__main__":
                                           world_size=world_size,
                                           rank=rank)
 
-    # ZeRO-3 uses all-gather collectives inside every forward pass, sized for
-    # train_micro_batch_size_per_gpu. A larger val batch can OOM because
-    # activation memory exceeds what DeepSpeed budgeted.
+    # With ZeRO-3, model parameters are partitioned across GPUs and only gathered temporarily
+    # into gpu memory during a forward/backward pass. Peak memory scales with batch size.
+    # During training, ds pre-allocates memory for train_batch_size_per_gpu.
+    # A larger val batch gathers the same parameters but processes more samples simultaneously,
+    # requiring more activation memory which can cause oom.
     if is_zero3 and config.train.val_batch_size_per_gpu > config.train.train_batch_size_per_gpu:
         logger.warning(f"val_batch_size_per_gpu ({config.train.val_batch_size_per_gpu}) > "
                        f"train_batch_size_per_gpu ({config.train.train_batch_size_per_gpu}) with ZeRO stage 3. "
-                       f"This may cause OOM during validation. Consider setting val_batch_size_per_gpu <= "
-                       f"train_batch_size_per_gpu.")
+                       f"This may cause OOM during validation. The warning is just a heads-up and this won't always OOM. "
+                       f"Consider setting val_batch_size_per_gpu <= train_batch_size_per_gpu.")
 
     ########
-    # 7. Intitate the learning algorithm (e.g., ppo)
+    # 7. Initiate the learning algorithm
     ########
     alg_class = load_algorithm(config.train.alg_name, Algorithm_Registry)
     alg = alg_class(model_engine=model_engine,
@@ -565,7 +564,7 @@ if __name__ == "__main__":
         tracker.finish()
 
     ########
-    # 15. Clean shutdow
+    # 15. Clean shutdown
     ########
     # release NCCL communicators and process group resources
     # to prevent orphaned processes and hangs on exit in multi-node setups.
