@@ -64,7 +64,7 @@ class WeightSyncExtension:
                 return param.data.float().sum().item()
         return None
 
-    def init_weight_nccl_group(self, master_addr, master_port, rank_offset, world_size, group_name, timeout_seconds):
+    def init_weight_nccl_group(self, master_addr, master_port, rank_offset, world_size, group_name, timeout_seconds, backend="gloo"):
         '''
             Initialize a custom NCCL process group for direct gpu-to-gpu broadcast.
             This group connects training rank 0 (rank=0) to all vllm TP workers
@@ -85,11 +85,13 @@ class WeightSyncExtension:
         tp_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         my_rank = rank_offset + tp_rank
         self.weight_sync_rank = my_rank
+        self.weight_sync_backend = backend
         self.weight_sync_group = create_nccl_process_group(init_method=f"tcp://{master_addr}:{master_port}",
                                                            rank=my_rank,
                                                            world_size=world_size,
                                                            group_name=group_name,
                                                            timeout_seconds=timeout_seconds,
+                                                           backend=backend,
                                                           )
         return True
 
@@ -111,15 +113,25 @@ class WeightSyncExtension:
                      "torch.float32":  torch.float32,}
         target_dtype = dtype_map.get(dtype_str, torch.bfloat16)
 
-        # Allocate receive buffer on GPU
-        buffer = torch.empty(shape, dtype=target_dtype, device="cuda")
+        # Allocate receive buffer. Use CPU for gloo (native), CUDA for nccl.
+        # Gloo handles CUDA tensors by staging through host memory, so using
+        # CPU directly avoids the redundant CUDA→CPU→gloo→CPU→CUDA round-trip.
+        backend = getattr(self, 'weight_sync_backend', 'gloo')
+        buf_device = "cuda" if backend == "nccl" else "cpu"
+        buffer = torch.empty(shape, dtype=target_dtype, device=buf_device)
 
-        # NCCL broadcast: rank 0 sends, all others receive
+        # Broadcast: rank 0 sends, all others receive
         torch.distributed.broadcast(buffer, src=0, group=self.weight_sync_group)
 
-        # Load into model. vllm's load_weights handles tp sharding internally
+        # Load into model. vllm's load_weights handles tp sharding and
+        # device placement internally (CPU tensors are moved to GPU).
         self.model_runner.model.load_weights(weights=[(param_name, buffer)])
 
+        # Synchronize before deleting the buffer to ensure load_weights kernels
+        # have completed reading from it. Without this, the async CUDA kernels
+        # may still be reading the buffer when it is deallocated, causing
+        # use-after-free and silent weight corruption.
+        torch.cuda.synchronize()
         del buffer
         if empty_cache:
             torch.cuda.empty_cache()
