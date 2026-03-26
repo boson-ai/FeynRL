@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/feynrl.png" alt="FeynRL Logo" width="400">
+</p>
+
 <h1 align="center">FeynRL</h1>
 
 <p align="center">
