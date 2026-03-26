@@ -755,6 +755,16 @@ def load_and_verify(method: str, input_yaml: str, experiment_id: str, rank: int,
                 if config.overlap.ess_sync_threshold is None or not (0.0 < config.overlap.ess_sync_threshold <= 1.0):
                     raise ValueError(f"overlap.ess_sync_threshold must be in (0.0, 1.0], got {config.overlap.ess_sync_threshold}")
 
+                # ESS-driven sync only works with P3O for now.
+                # Other algorithms must use fixed_sync_interval for mid-epoch sync.
+                alg_name = config.train.alg_name.lower() if config.train.alg_name else ""
+                fixed_interval = config.overlap.fixed_sync_interval
+                if alg_name != "p3o" and (fixed_interval is None or fixed_interval <= 0):
+                    if rank == 0:
+                        print(f"[Config] WARNING: overlap is enabled with algorithm '{config.train.alg_name}' "
+                              f"Set overlap.fixed_sync_interval > 0 for mid-epoch weight sync, "
+                              f"otherwise sync only happens at end-of-epoch boundaries as it does not compute ess_factor")
+
         # Validate batch_invariant GPU requirements (applies to RL and eval)
         if config.rollout and config.rollout.batch_invariant:
             try:
